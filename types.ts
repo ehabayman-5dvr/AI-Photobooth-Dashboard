@@ -142,10 +142,11 @@ export interface CloudinaryImage {
   type: string;
   created_at: string;
   context?: {
-    [key: string]: string;
+    custom?: Record<string, any>;
+    [key: string]: any;
   };
   metadata?: {
-    [key: string]: string;
+    [key: string]: any;
   };
   tags?: string[];
 }

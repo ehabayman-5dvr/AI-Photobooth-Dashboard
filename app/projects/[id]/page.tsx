@@ -1076,29 +1076,68 @@ export default function ProjectDetailPage() {
 
     const processedDetails = useMemo(() => {
         if (!inspectImage) return [];
-        const ctx = inspectImage.context || {};
+
+        const formatMetaValue = (val: unknown): string => {
+            if (val === null || val === undefined) return '';
+            if (typeof val === 'string') return val;
+            if (typeof val === 'number' || typeof val === 'boolean') return String(val);
+            if (Array.isArray(val)) {
+                return val.map(item => formatMetaValue(item)).filter(Boolean).join(', ');
+            }
+            try {
+                return JSON.stringify(val, null, 2);
+            } catch {
+                return String(val);
+            }
+        };
+
+        const rawCtx = inspectImage.context || {};
+        const flatCtx: Record<string, unknown> = {};
+        Object.entries(rawCtx).forEach(([k, v]) => {
+            if (k === 'custom' && v && typeof v === 'object' && !Array.isArray(v)) {
+                Object.entries(v as Record<string, unknown>).forEach(([ck, cv]) => {
+                    flatCtx[ck] = cv;
+                });
+            } else {
+                flatCtx[k] = v;
+            }
+        });
+
         const meta = inspectImage.metadata || {};
         const displayItems: { label: string; value: string }[] = [];
 
-        const promptKeys = Object.keys(ctx).filter(k => k.startsWith('prompt_'));
+        const promptKeys = Object.keys(flatCtx).filter(k => /^prompt_\d+$/.test(k) || k.startsWith('prompt_'));
         if (promptKeys.length > 0) {
             const sortedPromptKeys = promptKeys.sort((a, b) => {
-                const numA = parseInt(a.replace('prompt_', '')) || 0;
-                const numB = parseInt(b.replace('prompt_', '')) || 0;
+                const numA = parseInt(a.replace('prompt_', ''), 10) || 0;
+                const numB = parseInt(b.replace('prompt_', ''), 10) || 0;
                 return numA - numB;
             });
-            const fullPrompt = sortedPromptKeys.map(k => ctx[k]).join('');
-            displayItems.push({ label: 'Full Generation Prompt', value: fullPrompt });
+            const fullPrompt = sortedPromptKeys.map(k => formatMetaValue(flatCtx[k])).join('');
+            if (fullPrompt.trim()) {
+                displayItems.push({ label: 'Full Generation Prompt', value: fullPrompt });
+            }
+        } else if (flatCtx.prompt) {
+            const singlePrompt = formatMetaValue(flatCtx.prompt);
+            if (singlePrompt.trim()) {
+                displayItems.push({ label: 'Full Generation Prompt', value: singlePrompt });
+            }
         }
 
-        Object.entries(ctx).forEach(([key, value]) => {
-            if (!key.startsWith('prompt_')) {
-                displayItems.push({ label: key.replace(/_/g, ' '), value });
+        Object.entries(flatCtx).forEach(([key, value]) => {
+            if (!key.startsWith('prompt_') && !(key === 'prompt' && promptKeys.length === 0)) {
+                const formatted = formatMetaValue(value);
+                if (formatted.trim()) {
+                    displayItems.push({ label: key.replace(/_/g, ' '), value: formatted });
+                }
             }
         });
 
         Object.entries(meta).forEach(([key, value]) => {
-            displayItems.push({ label: key.replace(/_/g, ' '), value });
+            const formatted = formatMetaValue(value);
+            if (formatted.trim()) {
+                displayItems.push({ label: key.replace(/_/g, ' '), value: formatted });
+            }
         });
 
         return displayItems;
@@ -3928,8 +3967,13 @@ export default function ProjectDetailPage() {
                                 <div
                                     onClick={() => setLightboxImage(inspectImage)}
                                     style={{
-                                        aspectRatio: '2 / 3',
-                                        maxHeight: 340,
+                                        flexShrink: 0,
+                                        height: 340,
+                                        aspectRatio:
+                                            inspectImage.width && inspectImage.height
+                                                ? `${inspectImage.width} / ${inspectImage.height}`
+                                                : '2 / 3',
+                                        maxWidth: '100%',
                                         margin: '0 auto',
                                         borderRadius: 14,
                                         overflow: 'hidden',
@@ -3946,11 +3990,12 @@ export default function ProjectDetailPage() {
                                             width: '100%',
                                             height: '100%',
                                             objectFit: 'contain',
+                                            display: 'block',
                                         }}
                                     />
                                 </div>
 
-                                <div style={{ display: 'flex', gap: 8 }}>
+                                <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
                                     <button
                                         type="button"
                                         className={`btn ${
@@ -3987,6 +4032,7 @@ export default function ProjectDetailPage() {
 
                                 <div
                                     style={{
+                                        flexShrink: 0,
                                         display: 'grid',
                                         gridTemplateColumns: '1fr 1fr',
                                         gap: 10,
@@ -4025,6 +4071,7 @@ export default function ProjectDetailPage() {
                                 {processedDetails.length > 0 && (
                                     <div
                                         style={{
+                                            flexShrink: 0,
                                             display: 'flex',
                                             flexDirection: 'column',
                                             gap: 12,
@@ -4049,6 +4096,7 @@ export default function ProjectDetailPage() {
                                                         fontSize: 12,
                                                         lineHeight: 1.55,
                                                         whiteSpace: 'pre-wrap',
+                                                        wordBreak: 'break-word',
                                                     }}
                                                 >
                                                     {item.value}
