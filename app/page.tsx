@@ -81,7 +81,6 @@ export default function DashboardPage() {
                 currentGenerations: p.total_usage || 0,
                 is_active: p.is_active !== false,
                 status: p.is_active === false ? 'paused' : 'active',
-                enablePrinting: typeof p.enable_printing === 'boolean' ? p.enable_printing : true,
                 totalPrintedCopies: p.total_printed_copies || 0,
                 createdAt: p.created_at || '',
                 ownerId: p.created_by || '',

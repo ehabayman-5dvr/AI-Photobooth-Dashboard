@@ -25,13 +25,7 @@ CREATE TABLE IF NOT EXISTS public.profiles (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
 );
 
--- 4. GLOBAL SETTINGS & CLOUDINARY ACCOUNTS
-CREATE TABLE IF NOT EXISTS public.global_settings (
-    id TEXT PRIMARY KEY DEFAULT 'current',
-    cost_settings JSONB NOT NULL DEFAULT '[{"id": "gpt-image-2.6-flare", "modelName": "gpt-image-2.6-flare", "promptOnly": 0.04, "ref1": 0.06, "ref2": 0.08, "ref3": 0.10}, {"id": "gpt-image-2.5-flare", "modelName": "gpt-image-2.5-flare", "promptOnly": 0.035, "ref1": 0.05, "ref2": 0.065, "ref3": 0.08}, {"id": "gpt-image-2", "modelName": "gpt-image-2", "promptOnly": 0.03, "ref1": 0.045, "ref2": 0.06, "ref3": 0.075}, {"id": "gemini-nano-banana-2.1", "modelName": "gemini-nano-banana-2.1", "promptOnly": 0.02, "ref1": 0.03, "ref2": 0.04, "ref3": 0.05}]'::jsonb,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
-);
-
+-- 4. CLOUDINARY ACCOUNTS & AI MODELS
 CREATE TABLE IF NOT EXISTS public.cloudinary_accounts (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     label TEXT NOT NULL,
@@ -47,6 +41,22 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_cloudinary_accounts_single_default
     ON public.cloudinary_accounts (is_default)
     WHERE is_default = true;
 
+CREATE TABLE IF NOT EXISTS public.ai_models (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL UNIQUE,
+    provider TEXT NOT NULL CHECK (provider IN ('openai', 'gemini')) DEFAULT 'openai',
+    cost_1_ref NUMERIC(10, 4) NOT NULL DEFAULT 0.06,
+    cost_2_refs NUMERIC(10, 4) NOT NULL DEFAULT 0.08,
+    cost_3_plus_refs NUMERIC(10, 4) NOT NULL DEFAULT 0.10,
+    is_default BOOLEAN NOT NULL DEFAULT false,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_models_single_default
+    ON public.ai_models (is_default)
+    WHERE is_default = true;
+
 -- 5. PROJECTS
 CREATE TABLE IF NOT EXISTS public.projects (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -59,12 +69,10 @@ CREATE TABLE IF NOT EXISTS public.projects (
     cloudinary_account_id UUID REFERENCES public.cloudinary_accounts(id) ON DELETE RESTRICT,
     cloudinary_tag TEXT,
     cloudinary_folder TEXT,
-    ai_models_list JSONB NOT NULL DEFAULT '["gpt-image-2.6-flare", "gpt-image-2.5-flare", "gpt-image-2", "gemini-nano-banana-2.1"]'::jsonb,
-    selected_ai_model TEXT NOT NULL DEFAULT 'gpt-image-2.6-flare',
-    reference_images_count INTEGER NOT NULL DEFAULT 0,
-    enable_printing BOOLEAN NOT NULL DEFAULT true,
+    ai_model_id UUID REFERENCES public.ai_models(id) ON DELETE RESTRICT,
+    ai_api_key TEXT NOT NULL DEFAULT '',
+    reference_images_count INTEGER NOT NULL DEFAULT 1,
     total_printed_copies INTEGER NOT NULL DEFAULT 0,
-    operator_settings JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_by UUID REFERENCES public.profiles(id) ON DELETE SET NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
@@ -89,6 +97,8 @@ CREATE TABLE IF NOT EXISTS public.usage_logs (
 
 -- Indexes for performance
 CREATE INDEX IF NOT EXISTS idx_projects_created_by ON public.projects(created_by);
+CREATE INDEX IF NOT EXISTS idx_projects_cloudinary_account ON public.projects(cloudinary_account_id);
+CREATE INDEX IF NOT EXISTS idx_projects_ai_model ON public.projects(ai_model_id);
 CREATE INDEX IF NOT EXISTS idx_project_members_project ON public.project_members(project_id);
 CREATE INDEX IF NOT EXISTS idx_project_members_user ON public.project_members(user_id);
 CREATE INDEX IF NOT EXISTS idx_usage_logs_project_timestamp ON public.usage_logs(project_id, timestamp);
@@ -144,6 +154,26 @@ BEGIN
     WHERE is_default = true AND id <> target_id;
 
     UPDATE public.cloudinary_accounts
+    SET is_default = true,
+        updated_at = timezone('utc'::text, now())
+    WHERE id = target_id;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- RPC: Set Default AI Model Atomically
+CREATE OR REPLACE FUNCTION public.set_default_ai_model(target_id UUID)
+RETURNS VOID AS $$
+BEGIN
+    IF NOT public.is_admin() THEN
+        RAISE EXCEPTION 'Only admins can change the default AI model';
+    END IF;
+
+    UPDATE public.ai_models
+    SET is_default = false,
+        updated_at = timezone('utc'::text, now())
+    WHERE is_default = true AND id <> target_id;
+
+    UPDATE public.ai_models
     SET is_default = true,
         updated_at = timezone('utc'::text, now())
     WHERE id = target_id;
@@ -241,8 +271,8 @@ CREATE TRIGGER on_allowed_user_inserted_or_updated
 
 ALTER TABLE public.allowed_users ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.global_settings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.cloudinary_accounts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.ai_models ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.projects ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.project_members ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.usage_logs ENABLE ROW LEVEL SECURITY;
@@ -288,23 +318,6 @@ CREATE POLICY "Admins can delete profiles"
     TO authenticated
     USING (public.is_admin());
 
--- Global Settings Policies (read by everyone/anon, edit by admin)
-DROP POLICY IF EXISTS "Public read global settings" ON public.global_settings;
-DROP POLICY IF EXISTS "Admins update global settings" ON public.global_settings;
-
-CREATE POLICY "Public read global settings"
-    ON public.global_settings
-    FOR SELECT
-    TO anon, authenticated
-    USING (true);
-
-CREATE POLICY "Admins update global settings"
-    ON public.global_settings
-    FOR ALL
-    TO authenticated
-    USING (public.is_admin())
-    WITH CHECK (public.is_admin());
-
 -- Cloudinary Accounts Policies
 DROP POLICY IF EXISTS "Authenticated read cloudinary_accounts" ON public.cloudinary_accounts;
 DROP POLICY IF EXISTS "Admins manage cloudinary_accounts" ON public.cloudinary_accounts;
@@ -317,6 +330,23 @@ CREATE POLICY "Authenticated read cloudinary_accounts"
 
 CREATE POLICY "Admins manage cloudinary_accounts"
     ON public.cloudinary_accounts
+    FOR ALL
+    TO authenticated
+    USING (public.is_admin())
+    WITH CHECK (public.is_admin());
+
+-- AI Models Policies
+DROP POLICY IF EXISTS "Authenticated read ai_models" ON public.ai_models;
+DROP POLICY IF EXISTS "Admins manage ai_models" ON public.ai_models;
+
+CREATE POLICY "Authenticated read ai_models"
+    ON public.ai_models
+    FOR SELECT
+    TO authenticated
+    USING (true);
+
+CREATE POLICY "Admins manage ai_models"
+    ON public.ai_models
     FOR ALL
     TO authenticated
     USING (public.is_admin())
@@ -407,10 +437,14 @@ GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO anon, authenticated, service_role
 -- 12. INITIAL DATA SEEDING
 -- ==============================================================================
 
--- 12.1 Default Global Settings Row
-INSERT INTO public.global_settings (id)
-VALUES ('current')
-ON CONFLICT (id) DO NOTHING;
+-- 12.1 Default AI Models Catalog
+INSERT INTO public.ai_models (name, provider, cost_1_ref, cost_2_refs, cost_3_plus_refs, is_default)
+VALUES
+    ('gpt-image-2.6-flare', 'openai', 0.06, 0.08, 0.10, true),
+    ('gpt-image-2.5-flare', 'openai', 0.05, 0.065, 0.08, false),
+    ('gpt-image-2', 'openai', 0.045, 0.06, 0.075, false),
+    ('gemini-nano-banana-2.1', 'gemini', 0.03, 0.04, 0.05, false)
+ON CONFLICT (name) DO NOTHING;
 
 -- 12.2 Whitelist Initial Super Admin
 INSERT INTO public.allowed_users (email, role)

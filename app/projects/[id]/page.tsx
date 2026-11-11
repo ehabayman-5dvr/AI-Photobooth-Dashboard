@@ -10,13 +10,11 @@ import {
     UserRole,
     CloudinaryImage,
     CloudinaryAccount,
+    AiModel,
+    AiProvider,
+    getAiModelPrice,
+    DEFAULT_AI_MODEL_CATALOG,
     ProjectPlatformType,
-    ProjectOperatorSettings,
-    DEFAULT_AI_MODELS,
-    DEFAULT_OPERATOR_SETTINGS,
-    DEFAULT_MODEL_COSTS,
-    ModelCostSetting,
-    AutoRestartMode,
 } from '@/types';
 import { supabase } from '@/utils/supabase';
 import {
@@ -103,13 +101,13 @@ export default function ProjectDetailPage() {
     const [loadingMoreFeatured, setLoadingMoreFeatured] = useState(false);
     const [loadingMore, setLoadingMore] = useState(false);
 
-    // Cost settings & Cloudinary accounts loaded from Supabase
-    const [costSettings, setCostSettings] = useState<ModelCostSetting[]>(DEFAULT_MODEL_COSTS);
+    // AI Models catalog & Cloudinary accounts loaded from Supabase
+    const [aiModels, setAiModels] = useState<AiModel[]>(DEFAULT_AI_MODEL_CATALOG);
     const [cloudinaryAccounts, setCloudinaryAccounts] = useState<CloudinaryAccount[]>([]);
 
     // Overview right-rail Booth Setup quick-edit state
     const [boothLimit, setBoothLimit] = useState(1000);
-    const [boothModel, setBoothModel] = useState(DEFAULT_OPERATOR_SETTINGS.openaiModel);
+    const [boothModelId, setBoothModelId] = useState(DEFAULT_AI_MODEL_CATALOG[0].id);
     const [boothRefs, setBoothRefs] = useState(1);
     const [boothSaving, setBoothSaving] = useState(false);
     const [boothSaved, setBoothSaved] = useState(false);
@@ -126,11 +124,10 @@ export default function ProjectDetailPage() {
         cloudinaryApiKey: string;
         cloudinaryApiSecret: string;
         cloudinaryFolder: string;
-        aiModelsList: string[];
+        aiModelId: string;
+        aiApiKey: string;
         selectedAiModel: string;
-        enablePrinting: boolean;
         totalPrintedCopies: number;
-        operatorSettings: Required<ProjectOperatorSettings>;
     }>({
         name: '',
         description: '',
@@ -142,31 +139,20 @@ export default function ProjectDetailPage() {
         cloudinaryApiKey: '',
         cloudinaryApiSecret: '',
         cloudinaryFolder: '',
-        aiModelsList: [...DEFAULT_AI_MODELS],
-        selectedAiModel: DEFAULT_OPERATOR_SETTINGS.openaiModel,
-        enablePrinting: true,
+        aiModelId: DEFAULT_AI_MODEL_CATALOG[0].id,
+        aiApiKey: '',
+        selectedAiModel: DEFAULT_AI_MODEL_CATALOG[0].name,
         totalPrintedCopies: 0,
-        operatorSettings: { ...DEFAULT_OPERATOR_SETTINGS },
     });
 
-    const [newAiModelInput, setNewAiModelInput] = useState('');
-    const [newPrinterInput, setNewPrinterInput] = useState('');
-    const [newEraKeyInput, setNewEraKeyInput] = useState('');
     const [isSavingSettings, setIsSavingSettings] = useState(false);
     const [settingsSaveSuccess, setSettingsSaveSuccess] = useState(false);
     const [settingsError, setSettingsError] = useState('');
     const [showSecrets, setShowSecrets] = useState<{
-        cloudinarySecret: boolean;
-        openaiKey: boolean;
-        geminiKey: boolean;
-        operatorPassword: boolean;
+        aiApiKey: boolean;
     }>({
-        cloudinarySecret: false,
-        openaiKey: false,
-        geminiKey: false,
-        operatorPassword: false,
+        aiApiKey: false,
     });
-    const jsonImportInputRef = React.useRef<HTMLInputElement | null>(null);
 
     // Gallery & Featured state
     const [taggingId, setTaggingId] = useState<string | null>(null);
@@ -241,8 +227,12 @@ export default function ProjectDetailPage() {
                 return;
             }
 
-            const [{ data: globalSettings }, accRes] = await Promise.all([
-                supabase.from('global_settings').select('*').eq('id', 'current').single(),
+            const [modelsRes, accRes] = await Promise.all([
+                supabase
+                    .from('ai_models')
+                    .select('*')
+                    .order('is_default', { ascending: false })
+                    .order('created_at', { ascending: true }),
                 supabase
                     .from('cloudinary_accounts')
                     .select('*')
@@ -250,9 +240,19 @@ export default function ProjectDetailPage() {
                     .order('created_at', { ascending: true }),
             ]);
 
-            if (globalSettings && Array.isArray(globalSettings.cost_settings) && globalSettings.cost_settings.length > 0) {
-                setCostSettings(globalSettings.cost_settings);
+            let mappedModels: AiModel[] = DEFAULT_AI_MODEL_CATALOG;
+            if (!modelsRes.error && Array.isArray(modelsRes.data) && modelsRes.data.length > 0) {
+                mappedModels = modelsRes.data.map(m => ({
+                    id: m.id,
+                    name: m.name,
+                    provider: (m.provider === 'gemini' ? 'gemini' : 'openai') as AiProvider,
+                    cost1Ref: Number(m.cost_1_ref) || 0,
+                    cost2Refs: Number(m.cost_2_refs) || 0,
+                    cost3PlusRefs: Number(m.cost_3_plus_refs) || 0,
+                    isDefault: Boolean(m.is_default),
+                }));
             }
+            setAiModels(mappedModels);
 
             let mappedAccounts: CloudinaryAccount[] = [];
             if (!accRes.error && Array.isArray(accRes.data)) {
@@ -267,8 +267,6 @@ export default function ProjectDetailPage() {
                 setCloudinaryAccounts(mappedAccounts);
             }
 
-            const op: ProjectOperatorSettings = p.operator_settings || {};
-
             const matchedAccount =
                 (p.cloudinary_account_id
                     ? mappedAccounts.find(a => a.id === p.cloudinary_account_id)
@@ -281,27 +279,19 @@ export default function ProjectDetailPage() {
             const finalCloudName = matchedAccount?.cloudName || '';
             const finalApiKey = matchedAccount?.apiKey || '';
             const finalApiSecret = matchedAccount?.apiSecret || '';
-            const finalFolder = p.cloudinary_folder || p.cloudinary_tag || op.cloudinaryFolder || '';
+            const finalFolder = p.cloudinary_folder || p.cloudinary_tag || '';
 
-            const resolvedModelsList: string[] =
-                Array.isArray(p.ai_models_list) && p.ai_models_list.length > 0
-                    ? p.ai_models_list
-                    : Array.isArray(op.aiModelsList) && op.aiModelsList.length > 0
-                        ? op.aiModelsList
-                        : [...DEFAULT_AI_MODELS];
+            const matchedModel =
+                (p.ai_model_id ? mappedModels.find(m => m.id === p.ai_model_id) : null) ||
+                mappedModels.find(m => m.isDefault) ||
+                mappedModels[0] ||
+                DEFAULT_AI_MODEL_CATALOG[0];
 
-            const resolvedSelectedModel =
-                p.selected_ai_model ||
-                op.openaiModel ||
-                resolvedModelsList[0] ||
-                DEFAULT_OPERATOR_SETTINGS.openaiModel;
+            const resolvedModelId = matchedModel.id;
+            const resolvedSelectedModel = matchedModel.name;
+            const resolvedProvider: AiProvider = matchedModel.provider;
 
-            const resolvedEnablePrinting =
-                typeof p.enable_printing === 'boolean'
-                    ? p.enable_printing
-                    : typeof op.enablePrinting === 'boolean'
-                        ? op.enablePrinting
-                        : true;
+            const resolvedAiApiKey = typeof p.ai_api_key === 'string' ? p.ai_api_key : '';
 
             const resolvedProjectType: ProjectPlatformType =
                 p.project_type === 'web' || p.project_type === 'desktop'
@@ -309,25 +299,10 @@ export default function ProjectDetailPage() {
                     : 'desktop';
 
             const resolvedTotalPrintedCopies = p.total_printed_copies || 0;
-            const resolvedRefs = typeof p.reference_images_count === 'number' ? p.reference_images_count : 1;
-
-            const mergedOp: Required<ProjectOperatorSettings> = {
-                ...DEFAULT_OPERATOR_SETTINGS,
-                ...op,
-                cloudinaryCloudName: finalCloudName,
-                cloudinaryApiKey: finalApiKey,
-                cloudinaryApiSecret: finalApiSecret,
-                cloudinaryFolder: finalFolder,
-                dashboardProjectId: p.id,
-                openaiModel: resolvedSelectedModel,
-                aiModelsList: resolvedModelsList,
-                enablePrinting: resolvedEnablePrinting,
-                printerNames: Array.isArray(op.printerNames) ? op.printerNames : [],
-                customEraPrompts: {
-                    ...DEFAULT_OPERATOR_SETTINGS.customEraPrompts,
-                    ...(op.customEraPrompts || {}),
-                },
-            };
+            const resolvedRefs = Math.max(
+                1,
+                typeof p.reference_images_count === 'number' ? p.reference_images_count : 1
+            );
 
             const mapped: Project = {
                 id: p.id,
@@ -340,9 +315,11 @@ export default function ProjectDetailPage() {
                 is_active: p.is_active !== false,
                 status: p.is_active === false ? 'paused' : 'active',
                 projectType: resolvedProjectType,
-                aiModelsList: resolvedModelsList,
+                aiModelId: resolvedModelId,
+                aiModelProvider: resolvedProvider,
+                aiApiKey: resolvedAiApiKey,
+                aiModelsList: [resolvedSelectedModel],
                 selectedAiModel: resolvedSelectedModel,
-                enablePrinting: resolvedEnablePrinting,
                 totalPrintedCopies: resolvedTotalPrintedCopies,
                 referenceImagesCount: resolvedRefs,
                 cloudinaryAccountId: resolvedAccountId || null,
@@ -351,12 +328,11 @@ export default function ProjectDetailPage() {
                 cloudinaryFolder: finalFolder,
                 cloudinaryApiKey: finalApiKey,
                 cloudinaryApiSecret: finalApiSecret,
-                operatorSettings: mergedOp,
             };
 
             setProject(mapped);
             setBoothLimit(mapped.dailyLimit);
-            setBoothModel(resolvedSelectedModel);
+            setBoothModelId(resolvedModelId);
             setBoothRefs(resolvedRefs);
 
             setSettingsForm({
@@ -370,11 +346,10 @@ export default function ProjectDetailPage() {
                 cloudinaryApiKey: finalApiKey,
                 cloudinaryApiSecret: finalApiSecret,
                 cloudinaryFolder: finalFolder,
-                aiModelsList: resolvedModelsList,
+                aiModelId: resolvedModelId,
+                aiApiKey: resolvedAiApiKey,
                 selectedAiModel: resolvedSelectedModel,
-                enablePrinting: resolvedEnablePrinting,
                 totalPrintedCopies: resolvedTotalPrintedCopies,
-                operatorSettings: mergedOp,
             });
 
             // Fetch all usage logs for this project
@@ -491,18 +466,23 @@ export default function ProjectDetailPage() {
         if (!project) return;
         setBoothSaving(true);
         try {
-            const nextList = settingsForm.aiModelsList.includes(boothModel)
-                ? settingsForm.aiModelsList
-                : [boothModel, ...settingsForm.aiModelsList];
+            const chosenModel =
+                aiModels.find(m => m.id === boothModelId) ||
+                aiModels.find(m => m.isDefault) ||
+                aiModels[0] ||
+                DEFAULT_AI_MODEL_CATALOG[0];
+
+            const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+                chosenModel.id
+            );
 
             const res = await fetch(`/api/projects/${project.id}/settings`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     dailyLimit: boothLimit,
-                    selectedAiModel: boothModel,
-                    aiModelsList: nextList,
-                    referenceImagesCount: boothRefs,
+                    aiModelId: isUuid ? chosenModel.id : undefined,
+                    referenceImagesCount: Math.max(1, boothRefs),
                 }),
             });
             if (!res.ok) throw new Error('Failed to save booth setup');
@@ -845,125 +825,6 @@ export default function ProjectDetailPage() {
         setTimeout(() => setCopiedPrintUrl(false), 2000);
     };
 
-    const updateOpField = <K extends keyof Required<ProjectOperatorSettings>>(
-        key: K,
-        value: Required<ProjectOperatorSettings>[K]
-    ) => {
-        setSettingsForm(prev => ({
-            ...prev,
-            operatorSettings: {
-                ...prev.operatorSettings,
-                [key]: value,
-            },
-        }));
-    };
-
-    const handleAddAiModel = () => {
-        const trimmed = newAiModelInput.trim();
-        if (!trimmed) return;
-        if (settingsForm.aiModelsList.includes(trimmed)) {
-            setNewAiModelInput('');
-            return;
-        }
-        const nextList = [...settingsForm.aiModelsList, trimmed];
-        setSettingsForm(prev => ({
-            ...prev,
-            aiModelsList: nextList,
-            selectedAiModel: prev.selectedAiModel || trimmed,
-            operatorSettings: {
-                ...prev.operatorSettings,
-                aiModelsList: nextList,
-            },
-        }));
-        setNewAiModelInput('');
-    };
-
-    const handleRemoveAiModel = (modelName: string) => {
-        if (settingsForm.aiModelsList.length <= 1) {
-            alert('At least one AI model must remain in the list.');
-            return;
-        }
-        const nextList = settingsForm.aiModelsList.filter(m => m !== modelName);
-        const nextSelected =
-            settingsForm.selectedAiModel === modelName ? nextList[0] : settingsForm.selectedAiModel;
-        setSettingsForm(prev => ({
-            ...prev,
-            aiModelsList: nextList,
-            selectedAiModel: nextSelected,
-            operatorSettings: {
-                ...prev.operatorSettings,
-                aiModelsList: nextList,
-                openaiModel: nextSelected,
-            },
-        }));
-    };
-
-    const handleAddPrinterName = () => {
-        const trimmed = newPrinterInput.trim();
-        if (!trimmed) return;
-        const currentPrinters = settingsForm.operatorSettings.printerNames || [];
-        if (currentPrinters.includes(trimmed)) {
-            setNewPrinterInput('');
-            return;
-        }
-        const nextPrinters = [...currentPrinters, trimmed];
-        setSettingsForm(prev => ({
-            ...prev,
-            operatorSettings: {
-                ...prev.operatorSettings,
-                printerNames: nextPrinters,
-                selectedPrinterName: prev.operatorSettings.selectedPrinterName || trimmed,
-            },
-        }));
-        setNewPrinterInput('');
-    };
-
-    const handleRemovePrinterName = (printerName: string) => {
-        const currentPrinters = settingsForm.operatorSettings.printerNames || [];
-        const nextPrinters = currentPrinters.filter(p => p !== printerName);
-        setSettingsForm(prev => ({
-            ...prev,
-            operatorSettings: {
-                ...prev.operatorSettings,
-                printerNames: nextPrinters,
-                selectedPrinterName:
-                    prev.operatorSettings.selectedPrinterName === printerName
-                        ? nextPrinters[0] || ''
-                        : prev.operatorSettings.selectedPrinterName,
-            },
-        }));
-    };
-
-    const handleAddCustomEraPromptKey = () => {
-        const key = newEraKeyInput.trim().toLowerCase().replace(/\s+/g, '_');
-        if (!key) return;
-        setSettingsForm(prev => ({
-            ...prev,
-            operatorSettings: {
-                ...prev.operatorSettings,
-                customEraPrompts: {
-                    ...prev.operatorSettings.customEraPrompts,
-                    [key]: prev.operatorSettings.customEraPrompts[key] || '',
-                },
-            },
-        }));
-        setNewEraKeyInput('');
-    };
-
-    const handleRemoveCustomEraPromptKey = (key: string) => {
-        setSettingsForm(prev => {
-            const nextPrompts = { ...prev.operatorSettings.customEraPrompts };
-            delete nextPrompts[key];
-            return {
-                ...prev,
-                operatorSettings: {
-                    ...prev.operatorSettings,
-                    customEraPrompts: nextPrompts,
-                },
-            };
-        });
-    };
-
     const handleSaveProjectSettings = async (e: React.FormEvent) => {
         e.preventDefault();
         if (!project) return;
@@ -973,21 +834,16 @@ export default function ProjectDetailPage() {
         setSettingsError('');
 
         try {
-            const {
-                cloudinaryCloudName: _c1,
-                cloudinaryApiKey: _c2,
-                cloudinaryApiSecret: _c3,
-                ...cleanOpSettings
-            } = settingsForm.operatorSettings;
+            const chosenModel =
+                aiModels.find(m => m.id === settingsForm.aiModelId) ||
+                aiModels.find(m => m.name === settingsForm.selectedAiModel) ||
+                aiModels.find(m => m.isDefault) ||
+                aiModels[0] ||
+                DEFAULT_AI_MODEL_CATALOG[0];
 
-            const fullOperatorPayload: ProjectOperatorSettings = {
-                ...cleanOpSettings,
-                cloudinaryFolder: settingsForm.cloudinaryFolder.trim(),
-                dashboardProjectId: project.id,
-                openaiModel: settingsForm.selectedAiModel,
-                aiModelsList: settingsForm.aiModelsList,
-                enablePrinting: settingsForm.enablePrinting,
-            };
+            const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+                chosenModel.id
+            );
 
             const response = await fetch(`/api/projects/${project.id}/settings`, {
                 method: 'PUT',
@@ -996,15 +852,13 @@ export default function ProjectDetailPage() {
                     name: settingsForm.name.trim(),
                     description: settingsForm.description,
                     dailyLimit: settingsForm.dailyLimit,
-                    referenceImagesCount: settingsForm.referenceImagesCount,
+                    referenceImagesCount: Math.max(1, settingsForm.referenceImagesCount),
                     projectType: settingsForm.projectType,
                     cloudinaryAccountId: settingsForm.cloudinaryAccountId || null,
                     cloudinaryFolder: settingsForm.cloudinaryFolder.trim(),
-                    aiModelsList: settingsForm.aiModelsList,
-                    selectedAiModel: settingsForm.selectedAiModel,
-                    enablePrinting: settingsForm.enablePrinting,
+                    aiModelId: isUuid ? chosenModel.id : undefined,
+                    aiApiKey: settingsForm.aiApiKey.trim(),
                     totalPrintedCopies: settingsForm.totalPrintedCopies,
-                    operatorSettings: fullOperatorPayload,
                 }),
             });
 
@@ -1040,90 +894,6 @@ export default function ProjectDetailPage() {
             alert('Failed to simulate print increment.');
         } finally {
             setIsSimulatingPrint(false);
-        }
-    };
-
-    const handleExportOperatorJson = () => {
-        if (!project) return;
-        const payload = {
-            ...settingsForm.operatorSettings,
-            cloudinaryCloudName: settingsForm.cloudinaryCloudName.trim(),
-            cloudinaryApiKey: settingsForm.cloudinaryApiKey.trim(),
-            cloudinaryApiSecret: settingsForm.cloudinaryApiSecret.trim(),
-            cloudinaryFolder: settingsForm.cloudinaryFolder.trim(),
-            dashboardProjectId: project.id,
-            openaiModel: settingsForm.selectedAiModel,
-            aiModelsList: settingsForm.aiModelsList,
-            enablePrinting: settingsForm.enablePrinting,
-        };
-        const jsonString = JSON.stringify(payload, null, 2);
-        const blob = new Blob([jsonString], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = 'operator-settings.json';
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-    };
-
-    const handleImportOperatorJson = async (e: React.ChangeEvent<HTMLInputElement>) => {
-        const file = e.target.files?.[0];
-        if (!file || !project) return;
-
-        try {
-            const text = await file.text();
-            const parsed = JSON.parse(text);
-
-            const importedModels =
-                Array.isArray(parsed.aiModelsList) && parsed.aiModelsList.length > 0
-                    ? parsed.aiModelsList
-                    : settingsForm.aiModelsList;
-            const importedSelectedModel = parsed.openaiModel || settingsForm.selectedAiModel;
-            const mergedModels = importedModels.includes(importedSelectedModel)
-                ? importedModels
-                : [importedSelectedModel, ...importedModels];
-
-            const importedAcc = parsed.cloudinaryCloudName
-                ? cloudinaryAccounts.find(
-                      a =>
-                          a.cloudName.trim().toLowerCase() ===
-                          String(parsed.cloudinaryCloudName).trim().toLowerCase()
-                  )
-                : null;
-
-            setSettingsForm(prev => ({
-                ...prev,
-                cloudinaryAccountId: importedAcc?.id ?? prev.cloudinaryAccountId,
-                cloudinaryCloudName:
-                    importedAcc?.cloudName ?? parsed.cloudinaryCloudName ?? prev.cloudinaryCloudName,
-                cloudinaryApiKey:
-                    importedAcc?.apiKey ?? parsed.cloudinaryApiKey ?? prev.cloudinaryApiKey,
-                cloudinaryApiSecret:
-                    importedAcc?.apiSecret ?? parsed.cloudinaryApiSecret ?? prev.cloudinaryApiSecret,
-                cloudinaryFolder: parsed.cloudinaryFolder ?? prev.cloudinaryFolder,
-                aiModelsList: mergedModels,
-                selectedAiModel: importedSelectedModel,
-                enablePrinting:
-                    typeof parsed.enablePrinting === 'boolean' ? parsed.enablePrinting : prev.enablePrinting,
-                operatorSettings: {
-                    ...prev.operatorSettings,
-                    ...parsed,
-                    dashboardProjectId: project.id,
-                    printerNames: Array.isArray(parsed.printerNames)
-                        ? parsed.printerNames
-                        : prev.operatorSettings.printerNames,
-                    customEraPrompts: {
-                        ...prev.operatorSettings.customEraPrompts,
-                        ...(parsed.customEraPrompts || {}),
-                    },
-                },
-            }));
-        } catch (err: any) {
-            alert(`Invalid operator-settings.json file: ${err?.message || 'Parse error'}`);
-        } finally {
-            if (jsonImportInputRef.current) jsonImportInputRef.current.value = '';
         }
     };
 
@@ -1260,24 +1030,17 @@ export default function ProjectDetailPage() {
     }, [chartRange, customRange, dailyActivityMap, eventDaysSummary.entries]);
 
     // Cost computation helper
-    const computeCostForModel = (modelId: string, refsCount: number) => {
-        const lower = (modelId || '').toLowerCase();
+    const computeCostForModel = (modelIdOrName: string, refsCount: number) => {
+        const lower = (modelIdOrName || '').toLowerCase();
         const matched =
-            costSettings.find(
-                c =>
-                    c.id.toLowerCase() === lower ||
-                    c.modelName.toLowerCase() === lower ||
-                    lower.includes(c.id.toLowerCase())
-            ) || costSettings[0] || DEFAULT_MODEL_COSTS[0];
+            aiModels.find(
+                m => m.id.toLowerCase() === lower || m.name.toLowerCase() === lower
+            ) ||
+            aiModels.find(m => m.isDefault) ||
+            aiModels[0] ||
+            DEFAULT_AI_MODEL_CATALOG[0];
 
-        const perPortrait =
-            refsCount <= 0
-                ? matched.promptOnly
-                : refsCount === 1
-                  ? matched.ref1
-                  : refsCount === 2
-                    ? matched.ref2
-                    : matched.ref3;
+        const perPortrait = getAiModelPrice(matched, Math.max(1, refsCount));
         return {
             matched,
             perPortrait,
@@ -1285,13 +1048,13 @@ export default function ProjectDetailPage() {
     };
 
     const boothCost = useMemo(
-        () => computeCostForModel(boothModel, boothRefs),
-        [boothModel, boothRefs, costSettings]
+        () => computeCostForModel(boothModelId, boothRefs),
+        [boothModelId, boothRefs, aiModels]
     );
 
     const settingsCost = useMemo(
-        () => computeCostForModel(settingsForm.selectedAiModel, settingsForm.referenceImagesCount),
-        [settingsForm.selectedAiModel, settingsForm.referenceImagesCount, costSettings]
+        () => computeCostForModel(settingsForm.aiModelId, settingsForm.referenceImagesCount),
+        [settingsForm.aiModelId, settingsForm.referenceImagesCount, aiModels]
     );
 
     // Distinct days in Gallery images
@@ -1603,7 +1366,7 @@ export default function ProjectDetailPage() {
                                         </div>
                                     </div>
 
-                                    {project.projectType !== 'web' && project.enablePrinting && (
+                                    {project.projectType !== 'web' && (
                                         <div
                                             style={{
                                                 paddingLeft: 32,
@@ -2098,12 +1861,13 @@ export default function ProjectDetailPage() {
                                         <select
                                             className="field"
                                             value={boothRefs}
-                                            onChange={e => setBoothRefs(Number(e.target.value))}
+                                            onChange={e =>
+                                                setBoothRefs(Math.max(1, Number(e.target.value) || 1))
+                                            }
                                         >
-                                            <option value={0}>0 · prompt only</option>
                                             <option value={1}>1 · face</option>
                                             <option value={2}>2 · face + style</option>
-                                            <option value={3}>3 · face + style + bg</option>
+                                            <option value={3}>2+ · face + style + bg</option>
                                         </select>
                                     </div>
                                 </div>
@@ -2117,17 +1881,13 @@ export default function ProjectDetailPage() {
                                     </label>
                                     <select
                                         className="field"
-                                        value={boothModel}
-                                        onChange={e => setBoothModel(e.target.value)}
+                                        value={boothModelId}
+                                        onChange={e => setBoothModelId(e.target.value)}
                                     >
-                                        {Array.from(
-                                            new Set([
-                                                ...settingsForm.aiModelsList,
-                                                ...costSettings.map(c => c.id),
-                                            ])
-                                        ).map(m => (
-                                            <option key={m} value={m}>
-                                                {m}
+                                        {aiModels.map(m => (
+                                            <option key={m.id} value={m.id}>
+                                                {m.name} ({m.provider === 'gemini' ? 'Gemini' : 'OpenAI'})
+                                                {m.isDefault ? ' · Default' : ''}
                                             </option>
                                         ))}
                                     </select>
@@ -2152,7 +1912,7 @@ export default function ProjectDetailPage() {
                                                 marginTop: 4,
                                             }}
                                         >
-                                            ${boothCost.perPortrait.toFixed(2)}
+                                            ${boothCost.perPortrait.toFixed(3).replace(/0$/, '')}
                                         </div>
                                         <div
                                             style={{
@@ -2161,8 +1921,8 @@ export default function ProjectDetailPage() {
                                                 marginTop: 2,
                                             }}
                                         >
-                                            {boothRefs === 0
-                                                ? 'Prompt only'
+                                            {boothRefs >= 3
+                                                ? '2+ ref images'
                                                 : `${boothRefs} ref image${boothRefs > 1 ? 's' : ''}`}
                                         </div>
                                     </div>
@@ -2223,7 +1983,7 @@ export default function ProjectDetailPage() {
                                         justifyContent: 'space-between',
                                     }}
                                 >
-                                    <span>Prices come from Cost settings</span>
+                                    <span>Prices come from Image models catalog</span>
                                     <Link
                                         href="/settings"
                                         style={{
@@ -2232,7 +1992,7 @@ export default function ProjectDetailPage() {
                                             textDecoration: 'none',
                                         }}
                                     >
-                                        Edit prices →
+                                        Manage models →
                                     </Link>
                                 </div>
                             </div>
@@ -2253,10 +2013,14 @@ export default function ProjectDetailPage() {
                                         Limit {project.dailyLimit.toLocaleString()}
                                     </span>
                                     <span className="pill pill-muted">
-                                        {project.selectedAiModel || 'gpt-image-1.5'}
+                                        {project.selectedAiModel || 'gpt-image-2.6-flare'}
                                     </span>
                                     <span className="pill pill-muted">
-                                        {project.referenceImagesCount ?? 1} reference
+                                        {(project.referenceImagesCount ?? 1) >= 3
+                                            ? '2+ references'
+                                            : `${Math.max(1, project.referenceImagesCount ?? 1)} reference${
+                                                  (project.referenceImagesCount ?? 1) > 1 ? 's' : ''
+                                              }`}
                                     </span>
                                 </div>
                                 <p
@@ -3353,7 +3117,7 @@ export default function ProjectDetailPage() {
                         >
                             <div>
                                 <span className="lbl" style={{ color: 'var(--pink)' }}>
-                                    Booth &amp; Operator Configuration
+                                    Cloud &amp; Booth Configuration
                                 </span>
                                 <h3
                                     style={{
@@ -3363,42 +3127,11 @@ export default function ProjectDetailPage() {
                                         color: '#fff',
                                     }}
                                 >
-                                    Project &amp; operator-settings.json sync
+                                    Project settings synced to the booth
                                 </h3>
                             </div>
 
                             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                                <button
-                                    type="button"
-                                    className="btn"
-                                    onClick={handleExportOperatorJson}
-                                    style={{
-                                        background: 'rgba(255,255,255,.08)',
-                                        color: '#fff',
-                                        borderColor: 'rgba(255,255,255,.14)',
-                                    }}
-                                >
-                                    <Download size={14} /> Export JSON
-                                </button>
-                                <button
-                                    type="button"
-                                    className="btn"
-                                    onClick={() => jsonImportInputRef.current?.click()}
-                                    style={{
-                                        background: 'rgba(255,255,255,.08)',
-                                        color: '#fff',
-                                        borderColor: 'rgba(255,255,255,.14)',
-                                    }}
-                                >
-                                    <Upload size={14} /> Import JSON
-                                </button>
-                                <input
-                                    ref={jsonImportInputRef}
-                                    type="file"
-                                    accept="application/json,.json"
-                                    onChange={handleImportOperatorJson}
-                                    style={{ display: 'none' }}
-                                />
                                 <button
                                     type="submit"
                                     className="btn btn-pink"
@@ -3448,7 +3181,7 @@ export default function ProjectDetailPage() {
                                     gap: 8,
                                 }}
                             >
-                                <Check size={15} /> Project &amp; Operator settings saved!
+                                <Check size={15} /> Project settings saved!
                             </div>
                         )}
                     </div>
@@ -3457,7 +3190,7 @@ export default function ProjectDetailPage() {
                     <div className="card" style={{ padding: 28 }}>
                         <span className="lbl">Project details</span>
                         <h3 style={{ fontWeight: 700, fontSize: 18, margin: '4px 0 18px' }}>
-                            Name, platform &amp; printing
+                            Name, platform &amp; print counter
                         </h3>
 
                         <div
@@ -3517,11 +3250,6 @@ export default function ProjectDetailPage() {
                                             setSettingsForm(prev => ({
                                                 ...prev,
                                                 projectType: 'web',
-                                                enablePrinting: false,
-                                                operatorSettings: {
-                                                    ...prev.operatorSettings,
-                                                    enablePrinting: false,
-                                                },
                                             }))
                                         }
                                     >
@@ -3562,85 +3290,63 @@ export default function ProjectDetailPage() {
                                 }}
                             >
                                 <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                                    <input
-                                        type="checkbox"
-                                        checked={settingsForm.enablePrinting}
-                                        onChange={e => {
-                                            const checked = e.target.checked;
-                                            setSettingsForm(prev => ({
-                                                ...prev,
-                                                enablePrinting: checked,
-                                                operatorSettings: {
-                                                    ...prev.operatorSettings,
-                                                    enablePrinting: checked,
-                                                },
-                                            }));
-                                        }}
-                                        style={{
-                                            width: 18,
-                                            height: 18,
-                                            accentColor: 'var(--pink)',
-                                            cursor: 'pointer',
-                                        }}
-                                    />
+                                    <Printer size={18} style={{ color: '#0B7A4B', flexShrink: 0 }} />
                                     <div>
                                         <div style={{ fontWeight: 700, fontSize: 14 }}>
-                                            Printing &amp; copies counter enabled
+                                            Printed copies counter
                                         </div>
                                         <div style={{ fontSize: 12, color: 'var(--muted)' }}>
-                                            Track physical prints from the kiosk on the Overview tab
+                                            Physical prints reported by the desktop booth via POST /print (printer hardware settings stay local on the booth)
                                         </div>
                                     </div>
                                 </div>
 
-                                {settingsForm.enablePrinting && (
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                                        <div>
-                                            <span className="lbl" style={{ display: 'block' }}>
-                                                Total printed copies
-                                            </span>
-                                            <input
-                                                type="number"
-                                                min={0}
-                                                className="field"
-                                                style={{ width: 120, padding: '6px 10px' }}
-                                                value={settingsForm.totalPrintedCopies}
-                                                onChange={e =>
-                                                    setSettingsForm(prev => ({
-                                                        ...prev,
-                                                        totalPrintedCopies: Math.max(
-                                                            0,
-                                                            parseInt(e.target.value) || 0
-                                                        ),
-                                                    }))
-                                                }
-                                            />
-                                        </div>
-                                        <button
-                                            type="button"
-                                            className="btn"
-                                            disabled={isSimulatingPrint}
-                                            onClick={handleSimulatePrintIncrement}
-                                        >
-                                            {isSimulatingPrint ? 'Testing…' : '+1 Test print'}
-                                        </button>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                                    <div>
+                                        <span className="lbl" style={{ display: 'block' }}>
+                                            Total printed copies
+                                        </span>
+                                        <input
+                                            type="number"
+                                            min={0}
+                                            className="field"
+                                            style={{ width: 120, padding: '6px 10px' }}
+                                            value={settingsForm.totalPrintedCopies}
+                                            onChange={e =>
+                                                setSettingsForm(prev => ({
+                                                    ...prev,
+                                                    totalPrintedCopies: Math.max(
+                                                        0,
+                                                        parseInt(e.target.value) || 0
+                                                    ),
+                                                }))
+                                            }
+                                        />
                                     </div>
-                                )}
+                                    <button
+                                        type="button"
+                                        className="btn"
+                                        disabled={isSimulatingPrint}
+                                        onClick={handleSimulatePrintIncrement}
+                                    >
+                                        {isSimulatingPrint ? 'Testing…' : '+1 Test print'}
+                                    </button>
+                                </div>
                             </div>
                         )}
                     </div>
 
-                    {/* 2. Booth setup, AI Models & Cost */}
+                    {/* 2. Booth setup, AI Model & API Key */}
                     <div className="card" style={{ padding: 28 }}>
-                        <span className="lbl">Booth setup &amp; AI models</span>
+                        <span className="lbl">Booth setup &amp; AI model</span>
                         <h3 style={{ fontWeight: 700, fontSize: 18, margin: '4px 0 18px' }}>
-                            Portrait limit, models &amp; cost
+                            Portrait limit, image model &amp; API key
                         </h3>
 
                         <div
                             style={{
                                 display: 'grid',
-                                gridTemplateColumns: '1fr 1fr 1fr',
+                                gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))',
                                 gap: 14,
                                 marginBottom: 16,
                             }}
@@ -3664,26 +3370,25 @@ export default function ProjectDetailPage() {
                             </div>
                             <div>
                                 <label className="lbl" style={{ display: 'block', marginBottom: 6 }}>
-                                    Active AI model (openaiModel)
+                                    Active AI model (controlled from dashboard)
                                 </label>
                                 <select
                                     className="field"
-                                    value={settingsForm.selectedAiModel}
+                                    value={settingsForm.aiModelId}
                                     onChange={e => {
-                                        const m = e.target.value;
+                                        const chosenId = e.target.value;
+                                        const chosen = aiModels.find(m => m.id === chosenId);
                                         setSettingsForm(prev => ({
                                             ...prev,
-                                            selectedAiModel: m,
-                                            operatorSettings: {
-                                                ...prev.operatorSettings,
-                                                openaiModel: m,
-                                            },
+                                            aiModelId: chosenId,
+                                            selectedAiModel: chosen?.name || prev.selectedAiModel,
                                         }));
                                     }}
                                 >
-                                    {settingsForm.aiModelsList.map(m => (
-                                        <option key={m} value={m}>
-                                            {m}
+                                    {aiModels.map(m => (
+                                        <option key={m.id} value={m.id}>
+                                            {m.name} ({m.provider === 'gemini' ? 'Gemini' : 'OpenAI'})
+                                            {m.isDefault ? ' · Default' : ''}
                                         </option>
                                     ))}
                                 </select>
@@ -3698,14 +3403,16 @@ export default function ProjectDetailPage() {
                                     onChange={e =>
                                         setSettingsForm(prev => ({
                                             ...prev,
-                                            referenceImagesCount: Number(e.target.value),
+                                            referenceImagesCount: Math.max(
+                                                1,
+                                                Number(e.target.value) || 1
+                                            ),
                                         }))
                                     }
                                 >
-                                    <option value={0}>0 · prompt only</option>
                                     <option value={1}>1 · face</option>
                                     <option value={2}>2 · face + style</option>
-                                    <option value={3}>3 · face + style + bg</option>
+                                    <option value={3}>2+ · face + style + bg</option>
                                 </select>
                             </div>
                         </div>
@@ -3725,7 +3432,8 @@ export default function ProjectDetailPage() {
                         >
                             <div style={{ fontSize: 13 }}>
                                 Price per portrait:{' '}
-                                <b>${settingsCost.perPortrait.toFixed(2)}</b> · Spent so far:{' '}
+                                <b>${settingsCost.perPortrait.toFixed(3).replace(/0$/, '')}</b> · Spent
+                                so far:{' '}
                                 <b style={{ color: 'var(--pink)' }}>
                                     $
                                     {(
@@ -3746,169 +3454,93 @@ export default function ProjectDetailPage() {
                                     textDecoration: 'none',
                                 }}
                             >
-                                Edit model prices in Settings →
+                                Manage image models in Settings →
                             </Link>
                         </div>
 
-                        {/* AI Models List management */}
-                        <div style={{ marginBottom: 18 }}>
+                        <div>
                             <label className="lbl" style={{ display: 'block', marginBottom: 6 }}>
-                                Available AI models list
+                                {settingsCost.matched.provider === 'gemini'
+                                    ? 'Google Gemini API Key (for selected model)'
+                                    : 'OpenAI API Key (for selected model)'}
                             </label>
-                            <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+                            <div style={{ position: 'relative' }}>
                                 <input
-                                    type="text"
+                                    type={showSecrets.aiApiKey ? 'text' : 'password'}
                                     className="field"
-                                    value={newAiModelInput}
-                                    onChange={e => setNewAiModelInput(e.target.value)}
-                                    onKeyDown={e => {
-                                        if (e.key === 'Enter') {
-                                            e.preventDefault();
-                                            handleAddAiModel();
-                                        }
-                                    }}
-                                    placeholder="Add model ID (e.g. gpt-image-1.5)"
+                                    style={{ fontFamily: 'monospace', paddingRight: 36 }}
+                                    value={settingsForm.aiApiKey}
+                                    onChange={e =>
+                                        setSettingsForm(prev => ({
+                                            ...prev,
+                                            aiApiKey: e.target.value,
+                                        }))
+                                    }
+                                    placeholder={
+                                        settingsCost.matched.provider === 'gemini'
+                                            ? 'AIza...'
+                                            : 'sk-proj-...'
+                                    }
                                 />
                                 <button
                                     type="button"
-                                    className="btn"
-                                    onClick={handleAddAiModel}
+                                    onClick={() =>
+                                        setShowSecrets(p => ({ ...p, aiApiKey: !p.aiApiKey }))
+                                    }
+                                    style={{
+                                        position: 'absolute',
+                                        right: 10,
+                                        top: '50%',
+                                        transform: 'translateY(-50%)',
+                                        background: 'none',
+                                        border: 0,
+                                        cursor: 'pointer',
+                                        color: 'var(--muted)',
+                                    }}
                                 >
-                                    + Add model
+                                    {showSecrets.aiApiKey ? (
+                                        <EyeOff size={14} />
+                                    ) : (
+                                        <Eye size={14} />
+                                    )}
                                 </button>
                             </div>
-                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                                {settingsForm.aiModelsList.map(m => {
-                                    const active = settingsForm.selectedAiModel === m;
-                                    return (
-                                        <span
-                                            key={m}
-                                            className={`chip${active ? ' on' : ''}`}
-                                            style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
-                                        >
-                                            <span
-                                                onClick={() =>
-                                                    setSettingsForm(prev => ({
-                                                        ...prev,
-                                                        selectedAiModel: m,
-                                                        operatorSettings: {
-                                                            ...prev.operatorSettings,
-                                                            openaiModel: m,
-                                                        },
-                                                    }))
-                                                }
-                                            >
-                                                {m}
-                                            </span>
-                                            <button
-                                                type="button"
-                                                onClick={() => handleRemoveAiModel(m)}
-                                                style={{
-                                                    border: 0,
-                                                    background: 'transparent',
-                                                    color: 'inherit',
-                                                    cursor: 'pointer',
-                                                    padding: 0,
-                                                    fontSize: 12,
-                                                }}
-                                            >
-                                                ✕
-                                            </button>
-                                        </span>
-                                    );
-                                })}
-                            </div>
-                        </div>
-
-                        <div
-                            style={{
-                                display: 'grid',
-                                gridTemplateColumns: '1fr 1fr 1fr',
-                                gap: 14,
-                            }}
-                        >
-                            <div>
-                                <label className="lbl" style={{ display: 'block', marginBottom: 6 }}>
-                                    Image quality
-                                </label>
-                                <select
-                                    className="field"
-                                    value={settingsForm.operatorSettings.imageQuality}
-                                    onChange={e =>
-                                        updateOpField(
-                                            'imageQuality',
-                                            e.target.value as 'high' | 'medium' | 'low'
-                                        )
-                                    }
-                                >
-                                    <option value="high">High</option>
-                                    <option value="medium">Medium</option>
-                                    <option value="low">Low</option>
-                                </select>
-                            </div>
-                            <div>
-                                <label className="lbl" style={{ display: 'block', marginBottom: 6 }}>
-                                    OpenAI API Key
-                                </label>
-                                <div style={{ position: 'relative' }}>
-                                    <input
-                                        type={showSecrets.openaiKey ? 'text' : 'password'}
-                                        className="field"
-                                        value={settingsForm.operatorSettings.openaiApiKey}
-                                        onChange={e => updateOpField('openaiApiKey', e.target.value)}
-                                        placeholder="sk-proj-..."
-                                    />
-                                    <button
-                                        type="button"
-                                        onClick={() =>
-                                            setShowSecrets(p => ({ ...p, openaiKey: !p.openaiKey }))
-                                        }
+                            {settingsForm.aiApiKey.trim() &&
+                                ((settingsCost.matched.provider === 'gemini' &&
+                                    settingsForm.aiApiKey.trim().startsWith('sk-')) ||
+                                    (settingsCost.matched.provider === 'openai' &&
+                                        settingsForm.aiApiKey.trim().startsWith('AIza'))) && (
+                                    <div
                                         style={{
-                                            position: 'absolute',
-                                            right: 10,
-                                            top: '50%',
-                                            transform: 'translateY(-50%)',
-                                            background: 'none',
-                                            border: 0,
-                                            cursor: 'pointer',
-                                            color: 'var(--muted)',
+                                            fontSize: 12,
+                                            color: 'var(--pink)',
+                                            marginTop: 6,
+                                            fontWeight: 500,
                                         }}
                                     >
-                                        {showSecrets.openaiKey ? <EyeOff size={14} /> : <Eye size={14} />}
-                                    </button>
-                                </div>
-                            </div>
-                            <div>
-                                <label className="lbl" style={{ display: 'block', marginBottom: 6 }}>
-                                    Gemini API Key
-                                </label>
-                                <div style={{ position: 'relative' }}>
-                                    <input
-                                        type={showSecrets.geminiKey ? 'text' : 'password'}
-                                        className="field"
-                                        value={settingsForm.operatorSettings.geminiApiKey}
-                                        onChange={e => updateOpField('geminiApiKey', e.target.value)}
-                                        placeholder="AIza..."
-                                    />
-                                    <button
-                                        type="button"
-                                        onClick={() =>
-                                            setShowSecrets(p => ({ ...p, geminiKey: !p.geminiKey }))
-                                        }
-                                        style={{
-                                            position: 'absolute',
-                                            right: 10,
-                                            top: '50%',
-                                            transform: 'translateY(-50%)',
-                                            background: 'none',
-                                            border: 0,
-                                            cursor: 'pointer',
-                                            color: 'var(--muted)',
-                                        }}
-                                    >
-                                        {showSecrets.geminiKey ? <EyeOff size={14} /> : <Eye size={14} />}
-                                    </button>
-                                </div>
+                                        Heads up: this key starts with{' '}
+                                        <code>
+                                            {settingsForm.aiApiKey.trim().startsWith('sk-')
+                                                ? 'sk-'
+                                                : 'AIza'}
+                                        </code>
+                                        , which may not match{' '}
+                                        <b>
+                                            {settingsCost.matched.provider === 'gemini'
+                                                ? 'Google Gemini'
+                                                : 'OpenAI'}
+                                        </b>
+                                        . Please update the API key when switching providers.
+                                    </div>
+                                )}
+                            <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 6 }}>
+                                Synced to the booth automatically as{' '}
+                                <code>
+                                    {settingsCost.matched.provider === 'gemini'
+                                        ? 'geminiApiKey'
+                                        : 'openaiApiKey'}
+                                </code>{' '}
+                                alongside locked model <code>{settingsCost.matched.name}</code>.
                             </div>
                         </div>
                     </div>
@@ -3950,18 +3582,6 @@ export default function ProjectDetailPage() {
                                                     acc?.apiKey || prev.cloudinaryApiKey,
                                                 cloudinaryApiSecret:
                                                     acc?.apiSecret || prev.cloudinaryApiSecret,
-                                                operatorSettings: {
-                                                    ...prev.operatorSettings,
-                                                    cloudinaryCloudName:
-                                                        acc?.cloudName ||
-                                                        prev.operatorSettings.cloudinaryCloudName,
-                                                    cloudinaryApiKey:
-                                                        acc?.apiKey ||
-                                                        prev.operatorSettings.cloudinaryApiKey,
-                                                    cloudinaryApiSecret:
-                                                        acc?.apiSecret ||
-                                                        prev.operatorSettings.cloudinaryApiSecret,
-                                                },
                                             }));
                                         }}
                                     >
@@ -3996,10 +3616,6 @@ export default function ProjectDetailPage() {
                                         setSettingsForm(prev => ({
                                             ...prev,
                                             cloudinaryFolder: e.target.value,
-                                            operatorSettings: {
-                                                ...prev.operatorSettings,
-                                                cloudinaryFolder: e.target.value,
-                                            },
                                         }))
                                     }
                                     placeholder="e.g. Egyptian-Museum-Photobooth"
@@ -4046,39 +3662,19 @@ export default function ProjectDetailPage() {
                             )}
                         </div>
 
-                        <div
-                            style={{
-                                display: 'grid',
-                                gridTemplateColumns: '1fr 1fr',
-                                gap: 14,
-                                marginBottom: 16,
-                            }}
-                        >
-                            <div>
-                                <label className="lbl" style={{ display: 'block', marginBottom: 6 }}>
-                                    Photo Viewer URL (QR Target)
-                                </label>
-                                <input
-                                    type="url"
-                                    className="field"
-                                    value={settingsForm.operatorSettings.photoViewerUrl}
-                                    onChange={e => updateOpField('photoViewerUrl', e.target.value)}
-                                />
-                            </div>
-                            <div>
-                                <label className="lbl" style={{ display: 'block', marginBottom: 6 }}>
-                                    Project ID
-                                </label>
-                                <div style={{ display: 'flex', gap: 8 }}>
-                                    <input className="field" readOnly value={project.id} />
-                                    <button
-                                        type="button"
-                                        className="btn"
-                                        onClick={() => copyProjectId(project.id)}
-                                    >
-                                        {copiedId ? '✓ Copied' : 'Copy ID'}
-                                    </button>
-                                </div>
+                        <div style={{ marginBottom: 16 }}>
+                            <label className="lbl" style={{ display: 'block', marginBottom: 6 }}>
+                                Project ID
+                            </label>
+                            <div style={{ display: 'flex', gap: 8 }}>
+                                <input className="field" readOnly value={project.id} />
+                                <button
+                                    type="button"
+                                    className="btn"
+                                    onClick={() => copyProjectId(project.id)}
+                                >
+                                    {copiedId ? '✓ Copied' : 'Copy ID'}
+                                </button>
                             </div>
                         </div>
 
@@ -4173,464 +3769,6 @@ export default function ProjectDetailPage() {
                             )}
                         </div>
                     </div>
-
-                    {/* 4. Desktop-only sections: Printer Routing, Camera & Timers, Kiosk Security */}
-                    {settingsForm.projectType === 'desktop' && (
-                        <>
-                            <div className="card" style={{ padding: 28 }}>
-                                <span className="lbl">Hardware printing</span>
-                                <h3
-                                    style={{
-                                        fontWeight: 700,
-                                        fontSize: 18,
-                                        margin: '4px 0 18px',
-                                    }}
-                                >
-                                    Printer routing, margins &amp; compositing
-                                </h3>
-
-                                <div
-                                    style={{
-                                        display: 'grid',
-                                        gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
-                                        gap: 10,
-                                        marginBottom: 16,
-                                    }}
-                                >
-                                    {(
-                                        [
-                                            ['compositeFrameAndLogos', 'Composite Frame & Logos'],
-                                            ['autoPrintOnResult', 'Auto Print on Result'],
-                                            ['singlePrintPerSession', 'Single Print / Session'],
-                                            ['autoClearPrinterQueue', 'Auto Clear Print Queue'],
-                                        ] as const
-                                    ).map(([key, label]) => (
-                                        <label
-                                            key={key}
-                                            style={{
-                                                display: 'flex',
-                                                alignItems: 'center',
-                                                justifyContent: 'space-between',
-                                                padding: 12,
-                                                background: 'var(--ground)',
-                                                borderRadius: 10,
-                                                cursor: 'pointer',
-                                                fontSize: 12,
-                                                fontWeight: 600,
-                                            }}
-                                        >
-                                            <span>{label}</span>
-                                            <input
-                                                type="checkbox"
-                                                checked={Boolean(
-                                                    settingsForm.operatorSettings[key]
-                                                )}
-                                                onChange={e =>
-                                                    updateOpField(key, e.target.checked)
-                                                }
-                                                style={{
-                                                    accentColor: 'var(--pink)',
-                                                    width: 16,
-                                                    height: 16,
-                                                }}
-                                            />
-                                        </label>
-                                    ))}
-                                </div>
-
-                                <div
-                                    style={{
-                                        display: 'grid',
-                                        gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
-                                        gap: 10,
-                                        marginBottom: 16,
-                                    }}
-                                >
-                                    <div>
-                                        <label
-                                            className="lbl"
-                                            style={{ display: 'block', marginBottom: 6 }}
-                                        >
-                                            Fill color
-                                        </label>
-                                        <select
-                                            className="field"
-                                            value={settingsForm.operatorSettings.printFillColor}
-                                            onChange={e =>
-                                                updateOpField(
-                                                    'printFillColor',
-                                                    e.target.value as 'black' | 'white'
-                                                )
-                                            }
-                                        >
-                                            <option value="black">Black</option>
-                                            <option value="white">White</option>
-                                        </select>
-                                    </div>
-                                    <div>
-                                        <label
-                                            className="lbl"
-                                            style={{ display: 'block', marginBottom: 6 }}
-                                        >
-                                            Max copies
-                                        </label>
-                                        <input
-                                            type="number"
-                                            className="field"
-                                            value={settingsForm.operatorSettings.printCopies}
-                                            onChange={e =>
-                                                updateOpField(
-                                                    'printCopies',
-                                                    Number(e.target.value) || 1
-                                                )
-                                            }
-                                        />
-                                    </div>
-                                    <div>
-                                        <label
-                                            className="lbl"
-                                            style={{ display: 'block', marginBottom: 6 }}
-                                        >
-                                            Scale down (%)
-                                        </label>
-                                        <input
-                                            type="number"
-                                            step="0.5"
-                                            className="field"
-                                            value={
-                                                settingsForm.operatorSettings.printScaleDownPercent
-                                            }
-                                            onChange={e =>
-                                                updateOpField(
-                                                    'printScaleDownPercent',
-                                                    Number(e.target.value) || 0
-                                                )
-                                            }
-                                        />
-                                    </div>
-                                    <div>
-                                        <label
-                                            className="lbl"
-                                            style={{ display: 'block', marginBottom: 6 }}
-                                        >
-                                            Primary printer name
-                                        </label>
-                                        <input
-                                            className="field"
-                                            value={
-                                                settingsForm.operatorSettings.selectedPrinterName
-                                            }
-                                            onChange={e =>
-                                                updateOpField('selectedPrinterName', e.target.value)
-                                            }
-                                            placeholder="OS default"
-                                        />
-                                    </div>
-                                </div>
-
-                                <div
-                                    style={{
-                                        display: 'grid',
-                                        gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
-                                        gap: 10,
-                                    }}
-                                >
-                                    <div>
-                                        <label
-                                            className="lbl"
-                                            style={{ display: 'block', marginBottom: 6 }}
-                                        >
-                                            Top pad (px)
-                                        </label>
-                                        <input
-                                            type="number"
-                                            className="field"
-                                            value={settingsForm.operatorSettings.printTopPaddingPx}
-                                            onChange={e =>
-                                                updateOpField(
-                                                    'printTopPaddingPx',
-                                                    Number(e.target.value) || 0
-                                                )
-                                            }
-                                        />
-                                    </div>
-                                    <div>
-                                        <label
-                                            className="lbl"
-                                            style={{ display: 'block', marginBottom: 6 }}
-                                        >
-                                            Bottom pad (px)
-                                        </label>
-                                        <input
-                                            type="number"
-                                            className="field"
-                                            value={
-                                                settingsForm.operatorSettings.printBottomPaddingPx
-                                            }
-                                            onChange={e =>
-                                                updateOpField(
-                                                    'printBottomPaddingPx',
-                                                    Number(e.target.value) || 0
-                                                )
-                                            }
-                                        />
-                                    </div>
-                                    <div>
-                                        <label
-                                            className="lbl"
-                                            style={{ display: 'block', marginBottom: 6 }}
-                                        >
-                                            Left pad (px)
-                                        </label>
-                                        <input
-                                            type="number"
-                                            className="field"
-                                            value={settingsForm.operatorSettings.printLeftPaddingPx}
-                                            onChange={e =>
-                                                updateOpField(
-                                                    'printLeftPaddingPx',
-                                                    Number(e.target.value) || 0
-                                                )
-                                            }
-                                        />
-                                    </div>
-                                    <div>
-                                        <label
-                                            className="lbl"
-                                            style={{ display: 'block', marginBottom: 6 }}
-                                        >
-                                            Right pad (px)
-                                        </label>
-                                        <input
-                                            type="number"
-                                            className="field"
-                                            value={
-                                                settingsForm.operatorSettings.printRightPaddingPx
-                                            }
-                                            onChange={e =>
-                                                updateOpField(
-                                                    'printRightPaddingPx',
-                                                    Number(e.target.value) || 0
-                                                )
-                                            }
-                                        />
-                                    </div>
-                                </div>
-                            </div>
-
-                            <div
-                                style={{
-                                    display: 'grid',
-                                    gridTemplateColumns: '1fr 1fr',
-                                    gap: 20,
-                                }}
-                            >
-                                <div className="card" style={{ padding: 28 }}>
-                                    <span className="lbl">Viewport &amp; timers</span>
-                                    <h3
-                                        style={{
-                                            fontWeight: 700,
-                                            fontSize: 18,
-                                            margin: '4px 0 18px',
-                                        }}
-                                    >
-                                        Camera &amp; screen timers
-                                    </h3>
-                                    <div
-                                        style={{
-                                            display: 'grid',
-                                            gridTemplateColumns: '1fr 1fr',
-                                            gap: 10,
-                                            marginBottom: 12,
-                                        }}
-                                    >
-                                        <div>
-                                            <label
-                                                className="lbl"
-                                                style={{ display: 'block', marginBottom: 6 }}
-                                            >
-                                                Camera rotation
-                                            </label>
-                                            <select
-                                                className="field"
-                                                value={settingsForm.operatorSettings.cameraRotation}
-                                                onChange={e =>
-                                                    updateOpField(
-                                                        'cameraRotation',
-                                                        Number(e.target.value) as
-                                                            | -90
-                                                            | 0
-                                                            | 90
-                                                            | 180
-                                                    )
-                                                }
-                                            >
-                                                <option value={-90}>-90° (Vertical)</option>
-                                                <option value={0}>0° (Landscape)</option>
-                                                <option value={90}>90°</option>
-                                                <option value={180}>180°</option>
-                                            </select>
-                                        </div>
-                                        <div>
-                                            <label
-                                                className="lbl"
-                                                style={{ display: 'block', marginBottom: 6 }}
-                                            >
-                                                Countdown (s)
-                                            </label>
-                                            <input
-                                                type="number"
-                                                className="field"
-                                                value={
-                                                    settingsForm.operatorSettings.countdownSeconds
-                                                }
-                                                onChange={e =>
-                                                    updateOpField(
-                                                        'countdownSeconds',
-                                                        Number(e.target.value) || 3
-                                                    )
-                                                }
-                                            />
-                                        </div>
-                                    </div>
-                                    <div
-                                        style={{
-                                            display: 'grid',
-                                            gridTemplateColumns: '1fr 1fr',
-                                            gap: 10,
-                                        }}
-                                    >
-                                        <label
-                                            style={{
-                                                display: 'flex',
-                                                justifyContent: 'space-between',
-                                                padding: 12,
-                                                background: 'var(--ground)',
-                                                borderRadius: 10,
-                                                fontSize: 12,
-                                                fontWeight: 600,
-                                            }}
-                                        >
-                                            <span>Mirror Camera</span>
-                                            <input
-                                                type="checkbox"
-                                                checked={settingsForm.operatorSettings.cameraMirror}
-                                                onChange={e =>
-                                                    updateOpField('cameraMirror', e.target.checked)
-                                                }
-                                                style={{ accentColor: 'var(--pink)' }}
-                                            />
-                                        </label>
-                                        <label
-                                            style={{
-                                                display: 'flex',
-                                                justifyContent: 'space-between',
-                                                padding: 12,
-                                                background: 'var(--ground)',
-                                                borderRadius: 10,
-                                                fontSize: 12,
-                                                fontWeight: 600,
-                                            }}
-                                        >
-                                            <span>Sound Effects</span>
-                                            <input
-                                                type="checkbox"
-                                                checked={settingsForm.operatorSettings.soundEnabled}
-                                                onChange={e =>
-                                                    updateOpField('soundEnabled', e.target.checked)
-                                                }
-                                                style={{ accentColor: 'var(--pink)' }}
-                                            />
-                                        </label>
-                                    </div>
-                                </div>
-
-                                <div className="card" style={{ padding: 28 }}>
-                                    <span className="lbl">Security &amp; uptime</span>
-                                    <h3
-                                        style={{
-                                            fontWeight: 700,
-                                            fontSize: 18,
-                                            margin: '4px 0 18px',
-                                        }}
-                                    >
-                                        Kiosk lock &amp; auto-restart
-                                    </h3>
-                                    <div style={{ marginBottom: 12 }}>
-                                        <label
-                                            className="lbl"
-                                            style={{ display: 'block', marginBottom: 6 }}
-                                        >
-                                            Operator modal password
-                                        </label>
-                                        <input
-                                            type={showSecrets.operatorPassword ? 'text' : 'password'}
-                                            className="field"
-                                            value={settingsForm.operatorSettings.operatorPassword}
-                                            onChange={e =>
-                                                updateOpField('operatorPassword', e.target.value)
-                                            }
-                                        />
-                                    </div>
-                                    <div
-                                        style={{
-                                            display: 'grid',
-                                            gridTemplateColumns: '1fr 1fr',
-                                            gap: 10,
-                                        }}
-                                    >
-                                        <label
-                                            style={{
-                                                display: 'flex',
-                                                justifyContent: 'space-between',
-                                                padding: 12,
-                                                background: 'var(--ground)',
-                                                borderRadius: 10,
-                                                fontSize: 12,
-                                                fontWeight: 600,
-                                            }}
-                                        >
-                                            <span>Kiosk Locked</span>
-                                            <input
-                                                type="checkbox"
-                                                checked={settingsForm.operatorSettings.kioskLocked}
-                                                onChange={e =>
-                                                    updateOpField('kioskLocked', e.target.checked)
-                                                }
-                                                style={{ accentColor: 'var(--pink)' }}
-                                            />
-                                        </label>
-                                        <label
-                                            style={{
-                                                display: 'flex',
-                                                justifyContent: 'space-between',
-                                                padding: 12,
-                                                background: 'var(--ground)',
-                                                borderRadius: 10,
-                                                fontSize: 12,
-                                                fontWeight: 600,
-                                            }}
-                                        >
-                                            <span>Fullscreen on Tap</span>
-                                            <input
-                                                type="checkbox"
-                                                checked={
-                                                    settingsForm.operatorSettings.fullscreenOnTap
-                                                }
-                                                onChange={e =>
-                                                    updateOpField(
-                                                        'fullscreenOnTap',
-                                                        e.target.checked
-                                                    )
-                                                }
-                                                style={{ accentColor: 'var(--pink)' }}
-                                            />
-                                        </label>
-                                    </div>
-                                </div>
-                            </div>
-                        </>
-                    )}
 
                     {/* Danger Zone */}
                     <div

@@ -7,10 +7,10 @@ import {
     User,
     ProjectPlatformType,
     CloudinaryAccount,
-    DEFAULT_AI_MODELS,
-    DEFAULT_OPERATOR_SETTINGS,
-    ModelCostSetting,
-    DEFAULT_MODEL_COSTS,
+    AiModel,
+    AiProvider,
+    getAiModelPrice,
+    DEFAULT_AI_MODEL_CATALOG,
 } from '@/types';
 import { supabase } from '@/utils/supabase';
 import Link from 'next/link';
@@ -20,6 +20,8 @@ import { useAuth } from '@/components/AuthContext';
 type FilterChipId = 'all' | 'use' | 'done';
 type SortMode = 'most' | 'least' | 'name';
 type ViewMode = 'cards' | 'table';
+
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function formatShortDate(dateInput?: string): string {
     if (!dateInput) return '—';
@@ -53,22 +55,6 @@ function getProjectCategory(p: Project): {
     };
 }
 
-function getPriceForModel(
-    costSettings: ModelCostSetting[],
-    modelName: string,
-    refs: number
-): number {
-    const found =
-        costSettings.find(c => c.modelName === modelName) ||
-        costSettings[0] ||
-        DEFAULT_MODEL_COSTS[0];
-    if (!found) return 0.04;
-    if (refs === 1) return found.ref1;
-    if (refs === 2) return found.ref2;
-    if (refs >= 3) return found.ref3;
-    return found.promptOnly;
-}
-
 function ProjectsContent() {
     const { user } = useAuth();
     const searchParams = useSearchParams();
@@ -84,11 +70,12 @@ function ProjectsContent() {
     const [projects, setProjects] = useState<Project[]>([]);
     const [lastPortraitByProject, setLastPortraitByProject] = useState<Record<string, string>>({});
     const [users, setUsers] = useState<User[]>([]);
-    const [costSettings, setCostSettings] = useState<ModelCostSetting[]>(DEFAULT_MODEL_COSTS);
+    const [aiModels, setAiModels] = useState<AiModel[]>(DEFAULT_AI_MODEL_CATALOG);
     const [cloudinaryAccounts, setCloudinaryAccounts] = useState<CloudinaryAccount[]>([]);
     const [isLoading, setIsLoading] = useState(true);
     const [isSaving, setIsSaving] = useState(false);
     const [teamSearch, setTeamSearch] = useState('');
+    const [showNewApiKey, setShowNewApiKey] = useState(false);
 
     // New Project Form State
     const [newProject, setNewProject] = useState({
@@ -97,8 +84,8 @@ function ProjectsContent() {
         eventDate: '',
         dailyLimit: 1000,
         projectType: 'desktop' as ProjectPlatformType,
-        enablePrinting: true,
-        selectedAiModel: DEFAULT_OPERATOR_SETTINGS.openaiModel,
+        aiModelId: DEFAULT_AI_MODEL_CATALOG[0].id,
+        aiApiKey: '',
         referenceImagesCount: 1,
         assignedUserIds: [] as string[],
         cloudinaryAccountId: '',
@@ -140,12 +127,19 @@ function ProjectsContent() {
 
             if (pError) throw pError;
 
-            // Fetch Cloudinary Accounts
-            const { data: accData } = await supabase
-                .from('cloudinary_accounts')
-                .select('*')
-                .order('is_default', { ascending: false })
-                .order('created_at', { ascending: true });
+            // Fetch Cloudinary Accounts & AI Models Catalog in parallel
+            const [{ data: accData }, { data: modelRows, error: modelErr }] = await Promise.all([
+                supabase
+                    .from('cloudinary_accounts')
+                    .select('*')
+                    .order('is_default', { ascending: false })
+                    .order('created_at', { ascending: true }),
+                supabase
+                    .from('ai_models')
+                    .select('*')
+                    .order('is_default', { ascending: false })
+                    .order('created_at', { ascending: true }),
+            ]);
 
             const mappedAccs: CloudinaryAccount[] = (accData || []).map(a => ({
                 id: a.id,
@@ -157,13 +151,31 @@ function ProjectsContent() {
             }));
             setCloudinaryAccounts(mappedAccs);
 
-            const defaultAcc = mappedAccs.find(a => a.isDefault) || mappedAccs[0];
-            if (defaultAcc) {
-                setNewProject(prev => ({
-                    ...prev,
-                    cloudinaryAccountId: prev.cloudinaryAccountId || defaultAcc.id,
+            let resolvedModels: AiModel[] = DEFAULT_AI_MODEL_CATALOG;
+            if (!modelErr && modelRows && modelRows.length > 0) {
+                resolvedModels = modelRows.map(m => ({
+                    id: m.id,
+                    name: m.name,
+                    provider: (m.provider === 'gemini' ? 'gemini' : 'openai') as AiProvider,
+                    cost1Ref: Number(m.cost_1_ref) || 0,
+                    cost2Refs: Number(m.cost_2_refs) || 0,
+                    cost3PlusRefs: Number(m.cost_3_plus_refs) || 0,
+                    isDefault: Boolean(m.is_default),
                 }));
             }
+            setAiModels(resolvedModels);
+
+            const defaultAcc = mappedAccs.find(a => a.isDefault) || mappedAccs[0];
+            const defaultModel = resolvedModels.find(m => m.isDefault) || resolvedModels[0];
+
+            setNewProject(prev => ({
+                ...prev,
+                cloudinaryAccountId: prev.cloudinaryAccountId || defaultAcc?.id || '',
+                aiModelId:
+                    resolvedModels.some(m => m.id === prev.aiModelId)
+                        ? prev.aiModelId
+                        : defaultModel?.id || '',
+            }));
 
             const mappedProjects: Project[] = (projectsData || []).map(p => {
                 const linkedAcc =
@@ -172,6 +184,15 @@ function ProjectsContent() {
                         : null) ||
                     defaultAcc ||
                     null;
+
+                const linkedModel =
+                    (p.ai_model_id
+                        ? resolvedModels.find(m => m.id === p.ai_model_id)
+                        : null) ||
+                    defaultModel ||
+                    null;
+
+                const resolvedModelName = linkedModel?.name || 'gpt-image-2.6-flare';
 
                 return {
                     id: p.id,
@@ -184,14 +205,16 @@ function ProjectsContent() {
                     is_active: p.is_active !== false,
                     status: p.is_active === false ? 'paused' : 'active',
                     projectType: (p.project_type as ProjectPlatformType) || 'desktop',
-                    enablePrinting: typeof p.enable_printing === 'boolean' ? p.enable_printing : true,
                     totalPrintedCopies: p.total_printed_copies || 0,
-                    selectedAiModel: p.selected_ai_model || 'gpt-image-2.6-flare',
-                    referenceImagesCount:
-                        typeof p.reference_images_count === 'number' ? p.reference_images_count : 0,
-                    aiModelsList: Array.isArray(p.ai_models_list)
-                        ? p.ai_models_list
-                        : [...DEFAULT_AI_MODELS],
+                    aiModelId: p.ai_model_id || linkedModel?.id || null,
+                    aiModelProvider: linkedModel?.provider || 'openai',
+                    aiApiKey: typeof p.ai_api_key === 'string' ? p.ai_api_key : '',
+                    selectedAiModel: resolvedModelName,
+                    referenceImagesCount: Math.max(
+                        1,
+                        typeof p.reference_images_count === 'number' ? p.reference_images_count : 1
+                    ),
+                    aiModelsList: [resolvedModelName],
                     cloudinaryAccountId: p.cloudinary_account_id || linkedAcc?.id || null,
                     cloudinaryCloudName: linkedAcc?.cloudName || '',
                     cloudinaryTag: p.cloudinary_folder || p.cloudinary_tag,
@@ -217,17 +240,6 @@ function ProjectsContent() {
                     }
                 }
                 setLastPortraitByProject(lastMap);
-            }
-
-            // Fetch Global Cost Settings
-            const { data: globalData } = await supabase
-                .from('global_settings')
-                .select('cost_settings')
-                .eq('id', 'current')
-                .single();
-
-            if (globalData && Array.isArray(globalData.cost_settings) && globalData.cost_settings.length > 0) {
-                setCostSettings(globalData.cost_settings);
             }
 
             // Fetch Users (for assignment)
@@ -272,12 +284,16 @@ function ProjectsContent() {
                 newProject.cloudinaryTag.trim() ||
                 newProject.name.trim().replace(/\s+/g, '-');
 
-            const modelList = Array.from(
-                new Set([
-                    ...costSettings.map(c => c.modelName).filter(Boolean),
-                    ...DEFAULT_AI_MODELS,
-                ])
-            );
+            const chosenModel =
+                aiModels.find(m => m.id === newProject.aiModelId) ||
+                aiModels.find(m => m.isDefault) ||
+                aiModels[0] ||
+                DEFAULT_AI_MODEL_CATALOG[0];
+
+            const chosenModelUuid =
+                chosenModel && UUID_REGEX.test(chosenModel.id) ? chosenModel.id : null;
+            const trimmedApiKey = newProject.aiApiKey.trim();
+            const clampedRefs = Math.max(1, newProject.referenceImagesCount || 1);
 
             const chosenAccount =
                 cloudinaryAccounts.find(a => a.id === newProject.cloudinaryAccountId) ||
@@ -285,76 +301,26 @@ function ProjectsContent() {
                 cloudinaryAccounts[0] ||
                 null;
 
-            const {
-                cloudinaryCloudName: _c1,
-                cloudinaryApiKey: _c2,
-                cloudinaryApiSecret: _c3,
-                ...cleanDefaultOperatorSettings
-            } = DEFAULT_OPERATOR_SETTINGS;
-
             const projectData: Record<string, unknown> = {
                 name: newProject.name.trim(),
                 description: newProject.description.trim(),
                 max_usage: newProject.dailyLimit || 1000,
                 project_type: newProject.projectType,
-                enable_printing:
-                    newProject.projectType === 'web' ? false : newProject.enablePrinting,
                 cloudinary_account_id: chosenAccount?.id || null,
                 cloudinary_tag: folderTag,
                 cloudinary_folder: folderTag,
-                ai_models_list: modelList,
-                selected_ai_model: newProject.selectedAiModel,
-                reference_images_count: newProject.referenceImagesCount,
-                operator_settings: {
-                    ...cleanDefaultOperatorSettings,
-                    openaiModel: newProject.selectedAiModel,
-                    aiModelsList: modelList,
-                    cloudinaryFolder: folderTag,
-                    enablePrinting:
-                        newProject.projectType === 'web' ? false : newProject.enablePrinting,
-                },
+                ai_model_id: chosenModelUuid,
+                ai_api_key: trimmedApiKey,
+                reference_images_count: clampedRefs,
                 created_by: user?.id,
                 is_active: true,
             };
 
-            let { data: createdProject, error: pError } = await supabase
+            const { data: createdProject, error: pError } = await supabase
                 .from('projects')
                 .insert([projectData])
                 .select()
                 .single();
-
-            // Fallback if newest migration columns aren't applied yet
-            if (pError && pError.message?.includes('column')) {
-                const fallbackData: Record<string, unknown> = {
-                    name: newProject.name.trim(),
-                    description: newProject.description.trim(),
-                    max_usage: newProject.dailyLimit || 1000,
-                    project_type: newProject.projectType,
-                    enable_printing:
-                        newProject.projectType === 'web' ? false : newProject.enablePrinting,
-                    cloudinary_tag: folderTag,
-                    cloudinary_folder: folderTag,
-                    ai_models_list: modelList,
-                    selected_ai_model: newProject.selectedAiModel,
-                    operator_settings: {
-                        ...DEFAULT_OPERATOR_SETTINGS,
-                        openaiModel: newProject.selectedAiModel,
-                        aiModelsList: modelList,
-                        cloudinaryFolder: folderTag,
-                        enablePrinting:
-                            newProject.projectType === 'web' ? false : newProject.enablePrinting,
-                    },
-                    created_by: user?.id,
-                    is_active: true,
-                };
-                const retry = await supabase
-                    .from('projects')
-                    .insert([fallbackData])
-                    .select()
-                    .single();
-                createdProject = retry.data;
-                pError = retry.error;
-            }
 
             if (pError) throw pError;
 
@@ -368,16 +334,19 @@ function ProjectsContent() {
 
             await fetchData();
             setShowModal(false);
+            setShowNewApiKey(false);
             const defaultAcc =
                 cloudinaryAccounts.find(a => a.isDefault) || cloudinaryAccounts[0];
+            const defaultModel =
+                aiModels.find(m => m.isDefault) || aiModels[0] || DEFAULT_AI_MODEL_CATALOG[0];
             setNewProject({
                 name: '',
                 description: '',
                 eventDate: '',
                 dailyLimit: 1000,
                 projectType: 'desktop',
-                enablePrinting: true,
-                selectedAiModel: costSettings[0]?.modelName || DEFAULT_OPERATOR_SETTINGS.openaiModel,
+                aiModelId: defaultModel?.id || '',
+                aiApiKey: '',
                 referenceImagesCount: 1,
                 assignedUserIds: [],
                 cloudinaryAccountId: defaultAcc?.id || '',
@@ -478,11 +447,13 @@ function ProjectsContent() {
         ? `${counts.all} projects · ${counts.use} in use · ${counts.done} finished`
         : `Projects you're added to · ${counts.all}`;
 
-    const unitPrice = getPriceForModel(
-        costSettings,
-        newProject.selectedAiModel,
-        newProject.referenceImagesCount
-    );
+    const selectedNewModel =
+        aiModels.find(m => m.id === newProject.aiModelId) ||
+        aiModels.find(m => m.isDefault) ||
+        aiModels[0] ||
+        DEFAULT_AI_MODEL_CATALOG[0];
+
+    const unitPrice = getAiModelPrice(selectedNewModel, newProject.referenceImagesCount);
     const fullLimitPrice = unitPrice * (newProject.dailyLimit || 1000);
 
     const assignableUsers = users.filter(
@@ -856,7 +827,7 @@ function ProjectsContent() {
                                             }}
                                         >
                                             <span>Last portrait · {lastStr}</span>
-                                            {p.projectType !== 'web' && p.enablePrinting && (
+                                            {p.projectType !== 'web' && (
                                                 <span title="Total printed copies" style={{ fontWeight: 600 }}>
                                                     {(p.totalPrintedCopies || 0).toLocaleString()} printed
                                                 </span>
@@ -1299,7 +1270,6 @@ function ProjectsContent() {
                                             setNewProject(prev => ({
                                                 ...prev,
                                                 projectType: pt,
-                                                enablePrinting: pt === 'desktop',
                                             }));
                                         }}
                                     >
@@ -1359,32 +1329,6 @@ function ProjectsContent() {
                                         }
                                     />
                                 </label>
-
-                                {newProject.projectType === 'desktop' && (
-                                    <label
-                                        style={{
-                                            display: 'flex',
-                                            alignItems: 'center',
-                                            gap: 10,
-                                            fontSize: 14,
-                                            minHeight: 44,
-                                            cursor: 'pointer',
-                                        }}
-                                    >
-                                        <input
-                                            type="checkbox"
-                                            checked={newProject.enablePrinting}
-                                            onChange={e =>
-                                                setNewProject(prev => ({
-                                                    ...prev,
-                                                    enablePrinting: e.target.checked,
-                                                }))
-                                            }
-                                            style={{ width: 18, height: 18, accentColor: '#FF0066' }}
-                                        />
-                                        Printing enabled on booth
-                                    </label>
-                                )}
                             </div>
 
                             <div style={{ fontSize: 13, color: '#5C5C66' }}>
@@ -1405,7 +1349,7 @@ function ProjectsContent() {
                                 gap: 16,
                             }}
                         >
-                            <h3 style={{ margin: 0, fontSize: 18, fontWeight: 600 }}>AI model &amp; cost</h3>
+                            <h3 style={{ margin: 0, fontSize: 18, fontWeight: 600 }}>AI model &amp; API key</h3>
                             <div
                                 style={{
                                     display: 'grid',
@@ -1419,17 +1363,18 @@ function ProjectsContent() {
                                     </span>
                                     <select
                                         className="field"
-                                        value={newProject.selectedAiModel}
+                                        value={newProject.aiModelId}
                                         onChange={e =>
                                             setNewProject(prev => ({
                                                 ...prev,
-                                                selectedAiModel: e.target.value,
+                                                aiModelId: e.target.value,
                                             }))
                                         }
                                     >
-                                        {costSettings.map(m => (
-                                            <option key={m.id || m.modelName} value={m.modelName}>
-                                                {m.modelName}
+                                        {aiModels.map(m => (
+                                            <option key={m.id} value={m.id}>
+                                                {m.name} ({m.provider === 'gemini' ? 'Gemini' : 'OpenAI'})
+                                                {m.isDefault ? ' · Default' : ''}
                                             </option>
                                         ))}
                                     </select>
@@ -1445,16 +1390,72 @@ function ProjectsContent() {
                                         onChange={e =>
                                             setNewProject(prev => ({
                                                 ...prev,
-                                                referenceImagesCount: parseInt(e.target.value, 10) || 0,
+                                                referenceImagesCount: Math.max(
+                                                    1,
+                                                    parseInt(e.target.value, 10) || 1
+                                                ),
                                             }))
                                         }
                                     >
-                                        <option value={0}>None · prompt only</option>
-                                        <option value={1}>1 reference</option>
+                                        <option value={1}>1 reference (face)</option>
                                         <option value={2}>2 references</option>
-                                        <option value={3}>3 references</option>
+                                        <option value={3}>2+ references</option>
                                     </select>
                                 </label>
+                            </div>
+
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                                <span className="lbl" style={{ fontSize: 10 }}>
+                                    {selectedNewModel?.provider === 'gemini'
+                                        ? 'Gemini API key (optional now — can be added in Settings)'
+                                        : 'OpenAI API key (optional now — can be added in Settings)'}
+                                </span>
+                                <div style={{ display: 'flex', gap: 8 }}>
+                                    <input
+                                        className="field"
+                                        style={{ flex: 1, fontFamily: 'monospace', fontSize: 13 }}
+                                        type={showNewApiKey ? 'text' : 'password'}
+                                        placeholder={
+                                            selectedNewModel?.provider === 'gemini'
+                                                ? 'AIza...'
+                                                : 'sk-proj-...'
+                                        }
+                                        value={newProject.aiApiKey}
+                                        onChange={e =>
+                                            setNewProject(prev => ({
+                                                ...prev,
+                                                aiApiKey: e.target.value,
+                                            }))
+                                        }
+                                    />
+                                    <button
+                                        type="button"
+                                        className="btn btn-line"
+                                        style={{ minHeight: 42, padding: '0 14px', fontSize: 11 }}
+                                        onClick={() => setShowNewApiKey(prev => !prev)}
+                                    >
+                                        {showNewApiKey ? 'Hide' : 'Show'}
+                                    </button>
+                                </div>
+                                {newProject.aiApiKey.trim() &&
+                                    ((selectedNewModel?.provider === 'gemini' &&
+                                        newProject.aiApiKey.trim().startsWith('sk-')) ||
+                                        (selectedNewModel?.provider === 'openai' &&
+                                            newProject.aiApiKey.trim().startsWith('AIza'))) && (
+                                        <span style={{ fontSize: 12, color: '#B8004A' }}>
+                                            Heads up: this looks like an{' '}
+                                            {newProject.aiApiKey.trim().startsWith('sk-')
+                                                ? 'OpenAI'
+                                                : 'Gemini'}{' '}
+                                            key, while the selected model uses{' '}
+                                            <b>
+                                                {selectedNewModel?.provider === 'gemini'
+                                                    ? 'Google Gemini'
+                                                    : 'OpenAI'}
+                                            </b>
+                                            .
+                                        </span>
+                                    )}
                             </div>
 
                             <div

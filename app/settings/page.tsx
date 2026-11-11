@@ -7,8 +7,8 @@ import { useAuth } from '@/components/AuthContext';
 import {
     UserRole,
     CloudinaryAccount,
-    ModelCostSetting,
-    DEFAULT_MODEL_COSTS,
+    AiModel,
+    AiProvider,
 } from '@/types';
 import { supabase } from '@/utils/supabase';
 
@@ -28,26 +28,37 @@ const EMPTY_ACCOUNT_FORM: AccountFormState = {
     isDefault: false,
 };
 
+interface ModelFormState {
+    name: string;
+    provider: AiProvider;
+    cost1Ref: string;
+    cost2Refs: string;
+    cost3PlusRefs: string;
+    isDefault: boolean;
+}
+
+const EMPTY_MODEL_FORM: ModelFormState = {
+    name: '',
+    provider: 'openai',
+    cost1Ref: '0.06',
+    cost2Refs: '0.08',
+    cost3PlusRefs: '0.10',
+    isDefault: false,
+};
+
 export default function SettingsPage() {
     const { user, isAuthenticated } = useAuth();
     const router = useRouter();
 
-    const [costSettings, setCostSettings] = useState<ModelCostSetting[]>([
-        ...DEFAULT_MODEL_COSTS,
-    ]);
+    const [projectsCount, setProjectsCount] = useState(0);
+    const [isLoading, setIsLoading] = useState(true);
+
+    // Cloudinary Accounts state
     const [accounts, setAccounts] = useState<CloudinaryAccount[]>([]);
     const [usageByAccount, setUsageByAccount] = useState<Record<string, number>>({});
-    const [unassignedProjectsCount, setUnassignedProjectsCount] = useState(0);
-    const [projectsCount, setProjectsCount] = useState(0);
-    const [migrationMissing, setMigrationMissing] = useState(false);
+    const [unassignedAccountsCount, setUnassignedAccountsCount] = useState(0);
+    const [cloudinaryMigrationMissing, setCloudinaryMigrationMissing] = useState(false);
 
-    const [isLoading, setIsLoading] = useState(true);
-    const [isSaving, setIsSaving] = useState(false);
-    const [dirty, setDirty] = useState(false);
-    const [saved, setSaved] = useState(false);
-    const [removeModelIdx, setRemoveModelIdx] = useState<number | null>(null);
-
-    // Cloudinary Accounts CRUD state
     const [isAddingAccount, setIsAddingAccount] = useState(false);
     const [newAccountForm, setNewAccountForm] = useState<AccountFormState>(EMPTY_ACCOUNT_FORM);
     const [showNewSecret, setShowNewSecret] = useState(false);
@@ -63,6 +74,22 @@ export default function SettingsPage() {
     const [testStates, setTestStates] = useState<
         Record<string, { status: 'idle' | 'testing' | 'ok' | 'fail'; message?: string }>
     >({});
+
+    // AI Models state
+    const [models, setModels] = useState<AiModel[]>([]);
+    const [usageByModel, setUsageByModel] = useState<Record<string, number>>({});
+    const [unassignedModelsCount, setUnassignedModelsCount] = useState(0);
+    const [modelsMigrationMissing, setModelsMigrationMissing] = useState(false);
+
+    const [isAddingModel, setIsAddingModel] = useState(false);
+    const [newModelForm, setNewModelForm] = useState<ModelFormState>(EMPTY_MODEL_FORM);
+    const [isSavingModel, setIsSavingModel] = useState(false);
+
+    const [editingModelId, setEditingModelId] = useState<string | null>(null);
+    const [editModelForm, setEditModelForm] = useState<ModelFormState>(EMPTY_MODEL_FORM);
+
+    const [deleteTargetModel, setDeleteTargetModel] = useState<AiModel | null>(null);
+    const [isDeletingModel, setIsDeletingModel] = useState(false);
 
     const [toast, setToast] = useState('');
 
@@ -84,63 +111,101 @@ export default function SettingsPage() {
     const fetchSettings = async () => {
         setIsLoading(true);
         try {
-            const [gsRes, projRes, accRes] = await Promise.all([
-                supabase.from('global_settings').select('*').eq('id', 'current').single(),
+            const [projRes, accRes, modRes] = await Promise.all([
                 supabase.from('projects').select('*'),
                 supabase
                     .from('cloudinary_accounts')
                     .select('*')
                     .order('is_default', { ascending: false })
                     .order('created_at', { ascending: true }),
+                supabase
+                    .from('ai_models')
+                    .select('*')
+                    .order('is_default', { ascending: false })
+                    .order('created_at', { ascending: true }),
             ]);
-
-            if (gsRes.data) {
-                const parsedCosts: ModelCostSetting[] =
-                    Array.isArray(gsRes.data.cost_settings) && gsRes.data.cost_settings.length > 0
-                        ? gsRes.data.cost_settings
-                        : [...DEFAULT_MODEL_COSTS];
-                setCostSettings(parsedCosts);
-            }
 
             const projectRows = projRes.data || [];
             setProjectsCount(projectRows.length);
 
-            const countMap: Record<string, number> = {};
-            let unassigned = 0;
+            const accMap: Record<string, number> = {};
+            let unassignedAcc = 0;
+            const modMap: Record<string, number> = {};
+            let unassignedMod = 0;
+
             for (const p of projectRows) {
                 if (p.cloudinary_account_id) {
-                    countMap[p.cloudinary_account_id] =
-                        (countMap[p.cloudinary_account_id] || 0) + 1;
+                    accMap[p.cloudinary_account_id] =
+                        (accMap[p.cloudinary_account_id] || 0) + 1;
                 } else {
-                    unassigned++;
+                    unassignedAcc++;
+                }
+
+                if (p.ai_model_id) {
+                    modMap[p.ai_model_id] = (modMap[p.ai_model_id] || 0) + 1;
+                } else {
+                    unassignedMod++;
                 }
             }
-            setUsageByAccount(countMap);
-            setUnassignedProjectsCount(unassigned);
 
+            setUsageByAccount(accMap);
+            setUnassignedAccountsCount(unassignedAcc);
+            setUsageByModel(modMap);
+            setUnassignedModelsCount(unassignedMod);
+
+            // Cloudinary accounts
             if (
                 accRes.error &&
                 (accRes.error.code === '42P01' ||
                     accRes.error.code === 'PGRST205' ||
                     accRes.error.message?.includes('cloudinary_accounts'))
             ) {
-                setMigrationMissing(true);
+                setCloudinaryMigrationMissing(true);
                 setAccounts([]);
             } else if (accRes.error) {
                 throw accRes.error;
             } else {
-                setMigrationMissing(false);
-                const mappedAccounts: CloudinaryAccount[] = (accRes.data || []).map(a => ({
-                    id: a.id,
-                    label: a.label,
-                    cloudName: a.cloud_name,
-                    apiKey: a.api_key,
-                    apiSecret: a.api_secret,
-                    isDefault: Boolean(a.is_default),
-                    createdAt: a.created_at,
-                    updatedAt: a.updated_at,
-                }));
-                setAccounts(mappedAccounts);
+                setCloudinaryMigrationMissing(false);
+                setAccounts(
+                    (accRes.data || []).map(a => ({
+                        id: a.id,
+                        label: a.label,
+                        cloudName: a.cloud_name,
+                        apiKey: a.api_key,
+                        apiSecret: a.api_secret,
+                        isDefault: Boolean(a.is_default),
+                        createdAt: a.created_at,
+                        updatedAt: a.updated_at,
+                    }))
+                );
+            }
+
+            // AI models
+            if (
+                modRes.error &&
+                (modRes.error.code === '42P01' ||
+                    modRes.error.code === 'PGRST205' ||
+                    modRes.error.message?.includes('ai_models'))
+            ) {
+                setModelsMigrationMissing(true);
+                setModels([]);
+            } else if (modRes.error) {
+                throw modRes.error;
+            } else {
+                setModelsMigrationMissing(false);
+                setModels(
+                    (modRes.data || []).map(m => ({
+                        id: m.id,
+                        name: m.name,
+                        provider: m.provider === 'gemini' ? 'gemini' : 'openai',
+                        cost1Ref: Number(m.cost_1_ref) || 0,
+                        cost2Refs: Number(m.cost_2_refs) || 0,
+                        cost3PlusRefs: Number(m.cost_3_plus_refs) || 0,
+                        isDefault: Boolean(m.is_default),
+                        createdAt: m.created_at,
+                        updatedAt: m.updated_at,
+                    }))
+                );
             }
         } catch (err) {
             console.error('Error fetching global settings:', err);
@@ -149,84 +214,7 @@ export default function SettingsPage() {
         }
     };
 
-    const markDirty = () => {
-        setDirty(true);
-        setSaved(false);
-    };
-
-    const handleModelFieldChange = (
-        index: number,
-        field: keyof ModelCostSetting,
-        value: string | number
-    ) => {
-        setCostSettings(prev => {
-            const next = [...prev];
-            const current = { ...next[index] };
-            if (field === 'modelName') {
-                current.modelName = String(value);
-                current.id = String(value) || current.id;
-            } else if (
-                field === 'promptOnly' ||
-                field === 'ref1' ||
-                field === 'ref2' ||
-                field === 'ref3'
-            ) {
-                current[field] = Number(value) || 0;
-            }
-            next[index] = current;
-            return next;
-        });
-        markDirty();
-    };
-
-    const handleAddModel = () => {
-        const nextNum = costSettings.length + 1;
-        setCostSettings(prev => [
-            ...prev,
-            {
-                id: `model-${Date.now()}`,
-                modelName: `model-${nextNum}`,
-                promptOnly: 0.04,
-                ref1: 0.06,
-                ref2: 0.08,
-                ref3: 0.1,
-            },
-        ]);
-        markDirty();
-    };
-
-    const handleConfirmRemoveModel = () => {
-        if (removeModelIdx === null) return;
-        setCostSettings(prev => prev.filter((_, idx) => idx !== removeModelIdx));
-        setRemoveModelIdx(null);
-        markDirty();
-    };
-
-    const handleSaveCostSettings = async () => {
-        setIsSaving(true);
-        try {
-            const { error: saveError } = await supabase
-                .from('global_settings')
-                .update({
-                    cost_settings: costSettings,
-                    updated_at: new Date().toISOString(),
-                })
-                .eq('id', 'current');
-
-            if (saveError) throw saveError;
-
-            setDirty(false);
-            setSaved(true);
-            showToast('Cost settings saved');
-        } catch (err: unknown) {
-            const msg = err instanceof Error ? err.message : 'Save failed';
-            console.error('Error saving cost settings:', err);
-            showToast(msg);
-        } finally {
-            setIsSaving(false);
-        }
-    };
-
+    // ======================== CLOUDINARY ACCOUNTS HANDLERS ========================
     const handleTestAccount = async (
         key: string,
         payload: { accountId?: string; cloudName?: string; apiKey?: string; apiSecret?: string }
@@ -265,7 +253,6 @@ export default function SettingsPage() {
             });
 
             if (rpcErr) {
-                // Fallback two-step update if RPC isn't loaded yet
                 await supabase
                     .from('cloudinary_accounts')
                     .update({ is_default: false, updated_at: new Date().toISOString() })
@@ -419,11 +406,185 @@ export default function SettingsPage() {
         }
     };
 
+    // ======================== AI MODELS HANDLERS ========================
+    const handleSetDefaultModel = async (m: AiModel) => {
+        try {
+            const { error: rpcErr } = await supabase.rpc('set_default_ai_model', {
+                target_id: m.id,
+            });
+
+            if (rpcErr) {
+                await supabase
+                    .from('ai_models')
+                    .update({ is_default: false, updated_at: new Date().toISOString() })
+                    .eq('is_default', true);
+                const { error: setErr } = await supabase
+                    .from('ai_models')
+                    .update({ is_default: true, updated_at: new Date().toISOString() })
+                    .eq('id', m.id);
+                if (setErr) throw setErr;
+            }
+
+            await fetchSettings();
+            showToast(`"${m.name}" is now the default AI model`);
+        } catch (err: any) {
+            console.error('Failed to set default model:', err);
+            showToast(err?.message || 'Failed to update default model');
+        }
+    };
+
+    const handleCreateModel = async (e: React.FormEvent) => {
+        e.preventDefault();
+        const name = newModelForm.name.trim();
+        if (!name) {
+            showToast('Model name is required');
+            return;
+        }
+
+        const c1 = Math.max(0, parseFloat(newModelForm.cost1Ref) || 0);
+        const c2 = Math.max(0, parseFloat(newModelForm.cost2Refs) || 0);
+        const c3 = Math.max(0, parseFloat(newModelForm.cost3PlusRefs) || 0);
+        const shouldBeDefault = models.length === 0 || newModelForm.isDefault;
+
+        setIsSavingModel(true);
+        try {
+            if (shouldBeDefault && models.some(m => m.isDefault)) {
+                await supabase
+                    .from('ai_models')
+                    .update({ is_default: false, updated_at: new Date().toISOString() })
+                    .eq('is_default', true);
+            }
+
+            const { error } = await supabase.from('ai_models').insert([
+                {
+                    name,
+                    provider: newModelForm.provider,
+                    cost_1_ref: c1,
+                    cost_2_refs: c2,
+                    cost_3_plus_refs: c3,
+                    is_default: shouldBeDefault,
+                },
+            ]);
+
+            if (error) throw error;
+
+            setNewModelForm(EMPTY_MODEL_FORM);
+            setIsAddingModel(false);
+            await fetchSettings();
+            showToast(`Added model "${name}"`);
+        } catch (err: any) {
+            console.error('Error adding AI model:', err);
+            showToast(
+                err?.code === '23505'
+                    ? `A model named "${name}" already exists`
+                    : err?.message || 'Failed to add model'
+            );
+        } finally {
+            setIsSavingModel(false);
+        }
+    };
+
+    const startEditingModel = (m: AiModel) => {
+        setIsAddingModel(false);
+        setEditingModelId(m.id);
+        setEditModelForm({
+            name: m.name,
+            provider: m.provider,
+            cost1Ref: String(m.cost1Ref),
+            cost2Refs: String(m.cost2Refs),
+            cost3PlusRefs: String(m.cost3PlusRefs),
+            isDefault: m.isDefault,
+        });
+    };
+
+    const handleUpdateModel = async (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!editingModelId) return;
+
+        const name = editModelForm.name.trim();
+        if (!name) {
+            showToast('Model name is required');
+            return;
+        }
+
+        const c1 = Math.max(0, parseFloat(editModelForm.cost1Ref) || 0);
+        const c2 = Math.max(0, parseFloat(editModelForm.cost2Refs) || 0);
+        const c3 = Math.max(0, parseFloat(editModelForm.cost3PlusRefs) || 0);
+
+        setIsSavingModel(true);
+        try {
+            const { error } = await supabase
+                .from('ai_models')
+                .update({
+                    name,
+                    provider: editModelForm.provider,
+                    cost_1_ref: c1,
+                    cost_2_refs: c2,
+                    cost_3_plus_refs: c3,
+                    updated_at: new Date().toISOString(),
+                })
+                .eq('id', editingModelId);
+
+            if (error) throw error;
+
+            setEditingModelId(null);
+            await fetchSettings();
+            showToast(`Updated "${name}"`);
+        } catch (err: any) {
+            console.error('Error updating AI model:', err);
+            showToast(
+                err?.code === '23505'
+                    ? `A model named "${name}" already exists`
+                    : err?.message || 'Failed to update model'
+            );
+        } finally {
+            setIsSavingModel(false);
+        }
+    };
+
+    const handleConfirmDeleteModel = async () => {
+        if (!deleteTargetModel) return;
+        setIsDeletingModel(true);
+        try {
+            const wasDefault = deleteTargetModel.isDefault;
+            const { error } = await supabase
+                .from('ai_models')
+                .delete()
+                .eq('id', deleteTargetModel.id);
+
+            if (error) throw error;
+
+            const remaining = models.filter(m => m.id !== deleteTargetModel.id);
+            if (wasDefault && remaining.length > 0) {
+                await handleSetDefaultModel(remaining[0]);
+            } else {
+                await fetchSettings();
+            }
+
+            showToast(`Deleted model "${deleteTargetModel.name}"`);
+            setDeleteTargetModel(null);
+        } catch (err: any) {
+            console.error('Error deleting AI model:', err);
+            showToast(
+                err?.code === '23503'
+                    ? 'Cannot delete: projects are still using this model'
+                    : err?.message || 'Failed to delete model'
+            );
+        } finally {
+            setIsDeletingModel(false);
+        }
+    };
+
     if (!user || user.role !== UserRole.ADMIN) return null;
 
-    const getLinkedProjectsCount = (acc: CloudinaryAccount) => {
+    const getLinkedAccountProjectsCount = (acc: CloudinaryAccount) => {
         const direct = usageByAccount[acc.id] || 0;
-        return acc.isDefault ? direct + unassignedProjectsCount : direct;
+        return acc.isDefault ? direct + unassignedAccountsCount : direct;
+    };
+
+    const getLinkedModelProjectsCount = (m: AiModel) => {
+        const direct = usageByModel[m.id] || 0;
+        return m.isDefault ? direct + unassignedModelsCount : direct;
     };
 
     const renderTestLabel = (key: string) => {
@@ -457,7 +618,8 @@ export default function SettingsPage() {
             >
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
                     <div className="lbl">
-                        Applies to all {projectsCount} project{projectsCount === 1 ? '' : 's'}
+                        Shared catalog across all {projectsCount} project
+                        {projectsCount === 1 ? '' : 's'}
                     </div>
                     <h1
                         style={{
@@ -472,15 +634,6 @@ export default function SettingsPage() {
                         Settings
                     </h1>
                 </div>
-
-                <button
-                    type="button"
-                    className="btn btn-pink"
-                    disabled={!dirty || isSaving}
-                    onClick={handleSaveCostSettings}
-                >
-                    {isSaving ? 'Saving…' : saved && !dirty ? 'Saved' : 'Save cost changes'}
-                </button>
             </header>
 
             {isLoading ? (
@@ -492,7 +645,7 @@ export default function SettingsPage() {
                 </div>
             ) : (
                 <>
-                    {/* 1. Image storage (Cloudinary Accounts) */}
+                    {/* ======================== 1. CLOUDINARY ACCOUNTS ======================== */}
                     <section className="card emerge" aria-labelledby="st-h">
                         <div
                             style={{
@@ -521,7 +674,7 @@ export default function SettingsPage() {
                                 </div>
                             </div>
 
-                            {!migrationMissing && !isAddingAccount && (
+                            {!cloudinaryMigrationMissing && !isAddingAccount && (
                                 <button
                                     type="button"
                                     className="btn btn-pink"
@@ -540,7 +693,7 @@ export default function SettingsPage() {
                             )}
                         </div>
 
-                        {migrationMissing && (
+                        {cloudinaryMigrationMissing && (
                             <div
                                 style={{
                                     padding: '16px 20px',
@@ -556,13 +709,10 @@ export default function SettingsPage() {
                                 <code>
                                     supabase/migrations/20261111153000_create_cloudinary_accounts.sql
                                 </code>{' '}
-                                in your Supabase SQL Editor to create the{' '}
-                                <code>cloudinary_accounts</code> table and automatically import your
-                                existing credentials.
+                                in your Supabase SQL Editor.
                             </div>
                         )}
 
-                        {/* Add New Account Form */}
                         {isAddingAccount && (
                             <form
                                 onSubmit={handleCreateAccount}
@@ -576,17 +726,9 @@ export default function SettingsPage() {
                                     border: '1px solid #CFCAC1',
                                 }}
                             >
-                                <div
-                                    style={{
-                                        display: 'flex',
-                                        justifyContent: 'space-between',
-                                        alignItems: 'center',
-                                    }}
-                                >
-                                    <span className="lbl" style={{ color: '#FF0066' }}>
-                                        New Cloudinary account
-                                    </span>
-                                </div>
+                                <span className="lbl" style={{ color: '#FF0066' }}>
+                                    New Cloudinary account
+                                </span>
 
                                 <div
                                     style={{
@@ -781,8 +923,7 @@ export default function SettingsPage() {
                             </form>
                         )}
 
-                        {/* Existing Accounts List */}
-                        {!migrationMissing && accounts.length === 0 && !isAddingAccount ? (
+                        {!cloudinaryMigrationMissing && accounts.length === 0 && !isAddingAccount ? (
                             <div
                                 style={{
                                     padding: 28,
@@ -799,7 +940,7 @@ export default function SettingsPage() {
                         ) : (
                             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
                                 {accounts.map(acc => {
-                                    const linkedCount = getLinkedProjectsCount(acc);
+                                    const linkedCount = getLinkedAccountProjectsCount(acc);
                                     const isEditing = editingAccountId === acc.id;
                                     const maskedKey =
                                         acc.apiKey.length > 4
@@ -1215,8 +1356,8 @@ export default function SettingsPage() {
                         )}
                     </section>
 
-                    {/* 2. Cost settings */}
-                    <section className="card emerge" aria-labelledby="cost-h">
+                    {/* ======================== 2. IMAGE MODELS CATALOG & PRICING ======================== */}
+                    <section className="card emerge" aria-labelledby="mod-h">
                         <div
                             style={{
                                 display: 'flex',
@@ -1227,230 +1368,692 @@ export default function SettingsPage() {
                             }}
                         >
                             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                                <h2 id="cost-h" style={{ margin: 0, fontSize: 18, fontWeight: 600 }}>
-                                    Cost settings
+                                <h2 id="mod-h" style={{ margin: 0, fontSize: 18, fontWeight: 600 }}>
+                                    Image models &amp; pricing
                                 </h2>
                                 <div
                                     style={{
                                         fontSize: 14,
                                         color: '#5C5C66',
                                         lineHeight: 1.5,
-                                        maxWidth: 560,
+                                        maxWidth: 620,
                                     }}
                                 >
-                                    Price per portrait for each AI model, in US dollars. Each project
-                                    picks a model and number of references, and its cost is worked out
-                                    from here.
+                                    Catalog of AI image models and per-portrait USD prices (
+                                    <b style={{ color: '#050507' }}>1 ref</b>,{' '}
+                                    <b style={{ color: '#050507' }}>2 refs</b>,{' '}
+                                    <b style={{ color: '#050507' }}>2+ refs</b>). Each project
+                                    selects a model here and configures its own API key.
                                 </div>
                             </div>
 
-                            <button type="button" className="btn" onClick={handleAddModel}>
-                                <Plus size={16} />
-                                Add model
-                            </button>
+                            {!modelsMigrationMissing && !isAddingModel && (
+                                <button
+                                    type="button"
+                                    className="btn btn-pink"
+                                    onClick={() => {
+                                        setEditingModelId(null);
+                                        setNewModelForm({
+                                            ...EMPTY_MODEL_FORM,
+                                            isDefault: models.length === 0,
+                                        });
+                                        setIsAddingModel(true);
+                                    }}
+                                >
+                                    <Plus size={16} />
+                                    Add model
+                                </button>
+                            )}
                         </div>
 
-                        <div style={{ overflowX: 'auto' }}>
-                            <table
+                        {modelsMigrationMissing && (
+                            <div
                                 style={{
-                                    width: '100%',
-                                    minWidth: 720,
-                                    borderCollapse: 'collapse',
+                                    padding: '16px 20px',
+                                    borderRadius: 4,
+                                    border: '1px solid #E8C4C9',
+                                    background: '#FBE6E9',
+                                    color: '#8E1B2B',
+                                    fontSize: 13,
+                                    lineHeight: 1.55,
+                                }}
+                            >
+                                <b>Database migration pending:</b> Run{' '}
+                                <code>
+                                    supabase/migrations/20261111163500_create_ai_models.sql
+                                </code>{' '}
+                                in your Supabase SQL Editor to create the <code>ai_models</code>{' '}
+                                table and automatically import your existing models and project
+                                assignments.
+                            </div>
+                        )}
+
+                        {/* Add Model Form */}
+                        {isAddingModel && (
+                            <form
+                                onSubmit={handleCreateModel}
+                                style={{
+                                    display: 'flex',
+                                    flexDirection: 'column',
+                                    gap: 16,
+                                    padding: 20,
+                                    borderRadius: 4,
+                                    background: '#EEEBE5',
+                                    border: '1px solid #CFCAC1',
+                                }}
+                            >
+                                <span className="lbl" style={{ color: '#FF0066' }}>
+                                    New AI image model
+                                </span>
+
+                                <div
+                                    style={{
+                                        display: 'grid',
+                                        gridTemplateColumns:
+                                            'repeat(auto-fit, minmax(160px, 1fr))',
+                                        gap: 14,
+                                    }}
+                                >
+                                    <label
+                                        style={{
+                                            display: 'flex',
+                                            flexDirection: 'column',
+                                            gap: 6,
+                                            gridColumn: 'span 2',
+                                        }}
+                                    >
+                                        <span className="lbl" style={{ fontSize: 10 }}>
+                                            Model ID / name
+                                        </span>
+                                        <input
+                                            className="field"
+                                            type="text"
+                                            placeholder="e.g. gpt-image-2.6-flare"
+                                            value={newModelForm.name}
+                                            onChange={e => {
+                                                const val = e.target.value;
+                                                setNewModelForm(prev => ({
+                                                    ...prev,
+                                                    name: val,
+                                                    provider: val
+                                                        .toLowerCase()
+                                                        .includes('gemini')
+                                                        ? 'gemini'
+                                                        : prev.provider,
+                                                }));
+                                            }}
+                                            required
+                                        />
+                                    </label>
+
+                                    <label
+                                        style={{ display: 'flex', flexDirection: 'column', gap: 6 }}
+                                    >
+                                        <span className="lbl" style={{ fontSize: 10 }}>
+                                            Provider
+                                        </span>
+                                        <select
+                                            className="field"
+                                            value={newModelForm.provider}
+                                            onChange={e =>
+                                                setNewModelForm(prev => ({
+                                                    ...prev,
+                                                    provider: e.target.value as AiProvider,
+                                                }))
+                                            }
+                                        >
+                                            <option value="openai">OpenAI</option>
+                                            <option value="gemini">Google Gemini</option>
+                                        </select>
+                                    </label>
+
+                                    <label
+                                        style={{ display: 'flex', flexDirection: 'column', gap: 6 }}
+                                    >
+                                        <span className="lbl" style={{ fontSize: 10 }}>
+                                            1 reference ($)
+                                        </span>
+                                        <input
+                                            className="field"
+                                            type="number"
+                                            step="0.001"
+                                            min="0"
+                                            value={newModelForm.cost1Ref}
+                                            onChange={e =>
+                                                setNewModelForm(prev => ({
+                                                    ...prev,
+                                                    cost1Ref: e.target.value,
+                                                }))
+                                            }
+                                            required
+                                        />
+                                    </label>
+
+                                    <label
+                                        style={{ display: 'flex', flexDirection: 'column', gap: 6 }}
+                                    >
+                                        <span className="lbl" style={{ fontSize: 10 }}>
+                                            2 references ($)
+                                        </span>
+                                        <input
+                                            className="field"
+                                            type="number"
+                                            step="0.001"
+                                            min="0"
+                                            value={newModelForm.cost2Refs}
+                                            onChange={e =>
+                                                setNewModelForm(prev => ({
+                                                    ...prev,
+                                                    cost2Refs: e.target.value,
+                                                }))
+                                            }
+                                            required
+                                        />
+                                    </label>
+
+                                    <label
+                                        style={{ display: 'flex', flexDirection: 'column', gap: 6 }}
+                                    >
+                                        <span className="lbl" style={{ fontSize: 10 }}>
+                                            2+ references ($)
+                                        </span>
+                                        <input
+                                            className="field"
+                                            type="number"
+                                            step="0.001"
+                                            min="0"
+                                            value={newModelForm.cost3PlusRefs}
+                                            onChange={e =>
+                                                setNewModelForm(prev => ({
+                                                    ...prev,
+                                                    cost3PlusRefs: e.target.value,
+                                                }))
+                                            }
+                                            required
+                                        />
+                                    </label>
+                                </div>
+
+                                <div
+                                    style={{
+                                        display: 'flex',
+                                        flexWrap: 'wrap',
+                                        alignItems: 'center',
+                                        justifyContent: 'space-between',
+                                        gap: 12,
+                                    }}
+                                >
+                                    <label
+                                        style={{
+                                            display: 'inline-flex',
+                                            alignItems: 'center',
+                                            gap: 8,
+                                            fontSize: 13,
+                                            cursor: models.length === 0 ? 'default' : 'pointer',
+                                        }}
+                                    >
+                                        <input
+                                            type="checkbox"
+                                            checked={models.length === 0 || newModelForm.isDefault}
+                                            disabled={models.length === 0}
+                                            onChange={e =>
+                                                setNewModelForm(prev => ({
+                                                    ...prev,
+                                                    isDefault: e.target.checked,
+                                                }))
+                                            }
+                                            style={{
+                                                width: 16,
+                                                height: 16,
+                                                accentColor: '#FF0066',
+                                            }}
+                                        />
+                                        Set as default model for new projects
+                                    </label>
+
+                                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                                        <button
+                                            type="button"
+                                            className="btn"
+                                            onClick={() => setIsAddingModel(false)}
+                                        >
+                                            Cancel
+                                        </button>
+                                        <button
+                                            type="submit"
+                                            className="btn btn-pink"
+                                            disabled={isSavingModel}
+                                        >
+                                            {isSavingModel ? 'Saving…' : 'Save model'}
+                                        </button>
+                                    </div>
+                                </div>
+                            </form>
+                        )}
+
+                        {!modelsMigrationMissing && models.length === 0 && !isAddingModel ? (
+                            <div
+                                style={{
+                                    padding: 28,
+                                    borderRadius: 4,
+                                    background: '#EEEBE5',
+                                    textAlign: 'center',
+                                    color: '#5C5C66',
                                     fontSize: 14,
                                 }}
                             >
-                                <thead>
-                                    <tr style={{ textAlign: 'left' }}>
-                                        <th
-                                            scope="col"
-                                            className="lbl"
+                                No AI models configured yet. Click <b>Add model</b> above to add
+                                your first model.
+                            </div>
+                        ) : (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                                {models.map(m => {
+                                    const linkedCount = getLinkedModelProjectsCount(m);
+                                    const isEditing = editingModelId === m.id;
+
+                                    if (isEditing) {
+                                        return (
+                                            <form
+                                                key={m.id}
+                                                onSubmit={handleUpdateModel}
+                                                style={{
+                                                    display: 'flex',
+                                                    flexDirection: 'column',
+                                                    gap: 16,
+                                                    padding: 20,
+                                                    borderRadius: 4,
+                                                    background: '#EEEBE5',
+                                                    border: '1px solid #CFCAC1',
+                                                }}
+                                            >
+                                                <span
+                                                    className="lbl"
+                                                    style={{ color: '#FF0066' }}
+                                                >
+                                                    Editing · {m.name}
+                                                </span>
+
+                                                <div
+                                                    style={{
+                                                        display: 'grid',
+                                                        gridTemplateColumns:
+                                                            'repeat(auto-fit, minmax(160px, 1fr))',
+                                                        gap: 14,
+                                                    }}
+                                                >
+                                                    <label
+                                                        style={{
+                                                            display: 'flex',
+                                                            flexDirection: 'column',
+                                                            gap: 6,
+                                                            gridColumn: 'span 2',
+                                                        }}
+                                                    >
+                                                        <span
+                                                            className="lbl"
+                                                            style={{ fontSize: 10 }}
+                                                        >
+                                                            Model ID / name
+                                                        </span>
+                                                        <input
+                                                            className="field"
+                                                            type="text"
+                                                            value={editModelForm.name}
+                                                            onChange={e =>
+                                                                setEditModelForm(prev => ({
+                                                                    ...prev,
+                                                                    name: e.target.value,
+                                                                }))
+                                                            }
+                                                            required
+                                                        />
+                                                    </label>
+
+                                                    <label
+                                                        style={{
+                                                            display: 'flex',
+                                                            flexDirection: 'column',
+                                                            gap: 6,
+                                                        }}
+                                                    >
+                                                        <span
+                                                            className="lbl"
+                                                            style={{ fontSize: 10 }}
+                                                        >
+                                                            Provider
+                                                        </span>
+                                                        <select
+                                                            className="field"
+                                                            value={editModelForm.provider}
+                                                            onChange={e =>
+                                                                setEditModelForm(prev => ({
+                                                                    ...prev,
+                                                                    provider: e.target
+                                                                        .value as AiProvider,
+                                                                }))
+                                                            }
+                                                        >
+                                                            <option value="openai">OpenAI</option>
+                                                            <option value="gemini">
+                                                                Google Gemini
+                                                            </option>
+                                                        </select>
+                                                    </label>
+
+                                                    <label
+                                                        style={{
+                                                            display: 'flex',
+                                                            flexDirection: 'column',
+                                                            gap: 6,
+                                                        }}
+                                                    >
+                                                        <span
+                                                            className="lbl"
+                                                            style={{ fontSize: 10 }}
+                                                        >
+                                                            1 reference ($)
+                                                        </span>
+                                                        <input
+                                                            className="field"
+                                                            type="number"
+                                                            step="0.001"
+                                                            min="0"
+                                                            value={editModelForm.cost1Ref}
+                                                            onChange={e =>
+                                                                setEditModelForm(prev => ({
+                                                                    ...prev,
+                                                                    cost1Ref: e.target.value,
+                                                                }))
+                                                            }
+                                                            required
+                                                        />
+                                                    </label>
+
+                                                    <label
+                                                        style={{
+                                                            display: 'flex',
+                                                            flexDirection: 'column',
+                                                            gap: 6,
+                                                        }}
+                                                    >
+                                                        <span
+                                                            className="lbl"
+                                                            style={{ fontSize: 10 }}
+                                                        >
+                                                            2 references ($)
+                                                        </span>
+                                                        <input
+                                                            className="field"
+                                                            type="number"
+                                                            step="0.001"
+                                                            min="0"
+                                                            value={editModelForm.cost2Refs}
+                                                            onChange={e =>
+                                                                setEditModelForm(prev => ({
+                                                                    ...prev,
+                                                                    cost2Refs: e.target.value,
+                                                                }))
+                                                            }
+                                                            required
+                                                        />
+                                                    </label>
+
+                                                    <label
+                                                        style={{
+                                                            display: 'flex',
+                                                            flexDirection: 'column',
+                                                            gap: 6,
+                                                        }}
+                                                    >
+                                                        <span
+                                                            className="lbl"
+                                                            style={{ fontSize: 10 }}
+                                                        >
+                                                            2+ references ($)
+                                                        </span>
+                                                        <input
+                                                            className="field"
+                                                            type="number"
+                                                            step="0.001"
+                                                            min="0"
+                                                            value={editModelForm.cost3PlusRefs}
+                                                            onChange={e =>
+                                                                setEditModelForm(prev => ({
+                                                                    ...prev,
+                                                                    cost3PlusRefs: e.target.value,
+                                                                }))
+                                                            }
+                                                            required
+                                                        />
+                                                    </label>
+                                                </div>
+
+                                                <div
+                                                    style={{
+                                                        display: 'flex',
+                                                        justifyContent: 'space-between',
+                                                        alignItems: 'center',
+                                                        flexWrap: 'wrap',
+                                                        gap: 12,
+                                                    }}
+                                                >
+                                                    <span
+                                                        style={{ fontSize: 12, color: '#5C5C66' }}
+                                                    >
+                                                        Price updates apply across all{' '}
+                                                        <b>{linkedCount}</b> project
+                                                        {linkedCount === 1 ? '' : 's'} using this
+                                                        model.
+                                                    </span>
+
+                                                    <div
+                                                        style={{
+                                                            display: 'flex',
+                                                            flexWrap: 'wrap',
+                                                            gap: 8,
+                                                        }}
+                                                    >
+                                                        <button
+                                                            type="button"
+                                                            className="btn"
+                                                            onClick={() => setEditingModelId(null)}
+                                                        >
+                                                            Cancel
+                                                        </button>
+                                                        <button
+                                                            type="submit"
+                                                            className="btn btn-pink"
+                                                            disabled={isSavingModel}
+                                                        >
+                                                            {isSavingModel
+                                                                ? 'Saving…'
+                                                                : 'Save changes'}
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            </form>
+                                        );
+                                    }
+
+                                    return (
+                                        <div
+                                            key={m.id}
                                             style={{
-                                                padding: '0 8px 12px 0',
-                                                fontWeight: 500,
-                                                fontSize: 10,
-                                                width: '28%',
+                                                display: 'flex',
+                                                flexWrap: 'wrap',
+                                                alignItems: 'center',
+                                                justifyContent: 'space-between',
+                                                gap: 16,
+                                                padding: '16px 20px',
+                                                borderRadius: 4,
+                                                background: '#EEEBE5',
+                                                border: m.isDefault
+                                                    ? '1px solid #FF0066'
+                                                    : '1px solid #E3DFD8',
                                             }}
                                         >
-                                            AI model
-                                        </th>
-                                        <th
-                                            scope="col"
-                                            className="lbl"
-                                            style={{
-                                                padding: '0 8px 12px',
-                                                fontWeight: 500,
-                                                fontSize: 10,
-                                            }}
-                                        >
-                                            Prompt only
-                                        </th>
-                                        <th
-                                            scope="col"
-                                            className="lbl"
-                                            style={{
-                                                padding: '0 8px 12px',
-                                                fontWeight: 500,
-                                                fontSize: 10,
-                                            }}
-                                        >
-                                            +1 reference
-                                        </th>
-                                        <th
-                                            scope="col"
-                                            className="lbl"
-                                            style={{
-                                                padding: '0 8px 12px',
-                                                fontWeight: 500,
-                                                fontSize: 10,
-                                            }}
-                                        >
-                                            +2 references
-                                        </th>
-                                        <th
-                                            scope="col"
-                                            className="lbl"
-                                            style={{
-                                                padding: '0 8px 12px',
-                                                fontWeight: 500,
-                                                fontSize: 10,
-                                            }}
-                                        >
-                                            +3 references
-                                        </th>
-                                        <th
-                                            scope="col"
-                                            style={{ padding: '0 0 12px', width: 44 }}
-                                        />
-                                    </tr>
-                                </thead>
-                                <tbody className="stagger">
-                                    {costSettings.map((m, idx) => (
-                                        <tr key={m.id || idx}>
-                                            <td style={{ padding: '6px 8px 6px 0' }}>
-                                                <input
-                                                    className="field"
-                                                    type="text"
-                                                    placeholder="Model name"
-                                                    aria-label={`Model name, row ${idx + 1}`}
-                                                    value={m.modelName}
-                                                    onChange={e =>
-                                                        handleModelFieldChange(
-                                                            idx,
-                                                            'modelName',
-                                                            e.target.value
-                                                        )
-                                                    }
-                                                />
-                                            </td>
-                                            <td style={{ padding: '6px 8px' }}>
-                                                <input
-                                                    className="field"
-                                                    type="number"
-                                                    step="0.001"
-                                                    min="0"
-                                                    placeholder="$ 0.000"
-                                                    aria-label={`Price prompt only, row ${idx + 1}`}
-                                                    value={m.promptOnly}
-                                                    onChange={e =>
-                                                        handleModelFieldChange(
-                                                            idx,
-                                                            'promptOnly',
-                                                            e.target.value
-                                                        )
-                                                    }
-                                                />
-                                            </td>
-                                            <td style={{ padding: '6px 8px' }}>
-                                                <input
-                                                    className="field"
-                                                    type="number"
-                                                    step="0.001"
-                                                    min="0"
-                                                    placeholder="$ 0.000"
-                                                    aria-label={`Price with 1 reference, row ${idx + 1}`}
-                                                    value={m.ref1}
-                                                    onChange={e =>
-                                                        handleModelFieldChange(
-                                                            idx,
-                                                            'ref1',
-                                                            e.target.value
-                                                        )
-                                                    }
-                                                />
-                                            </td>
-                                            <td style={{ padding: '6px 8px' }}>
-                                                <input
-                                                    className="field"
-                                                    type="number"
-                                                    step="0.001"
-                                                    min="0"
-                                                    placeholder="$ 0.000"
-                                                    aria-label={`Price with 2 references, row ${idx + 1}`}
-                                                    value={m.ref2}
-                                                    onChange={e =>
-                                                        handleModelFieldChange(
-                                                            idx,
-                                                            'ref2',
-                                                            e.target.value
-                                                        )
-                                                    }
-                                                />
-                                            </td>
-                                            <td style={{ padding: '6px 8px' }}>
-                                                <input
-                                                    className="field"
-                                                    type="number"
-                                                    step="0.001"
-                                                    min="0"
-                                                    placeholder="$ 0.000"
-                                                    aria-label={`Price with 3 references, row ${idx + 1}`}
-                                                    value={m.ref3}
-                                                    onChange={e =>
-                                                        handleModelFieldChange(
-                                                            idx,
-                                                            'ref3',
-                                                            e.target.value
-                                                        )
-                                                    }
-                                                />
-                                            </td>
-                                            <td style={{ padding: '6px 0' }}>
+                                            <div
+                                                style={{
+                                                    display: 'flex',
+                                                    flexDirection: 'column',
+                                                    gap: 6,
+                                                    minWidth: 240,
+                                                }}
+                                            >
+                                                <div
+                                                    style={{
+                                                        display: 'flex',
+                                                        alignItems: 'center',
+                                                        gap: 8,
+                                                        flexWrap: 'wrap',
+                                                    }}
+                                                >
+                                                    <code
+                                                        className="mono"
+                                                        style={{
+                                                            fontWeight: 700,
+                                                            fontSize: 14,
+                                                            color: '#050507',
+                                                        }}
+                                                    >
+                                                        {m.name}
+                                                    </code>
+
+                                                    <span
+                                                        style={{
+                                                            padding: '2px 8px',
+                                                            borderRadius: 999,
+                                                            background:
+                                                                m.provider === 'gemini'
+                                                                    ? '#E8EEF5'
+                                                                    : '#E6F2EC',
+                                                            color:
+                                                                m.provider === 'gemini'
+                                                                    ? '#2A4B7C'
+                                                                    : '#1F6B4A',
+                                                            fontSize: 11,
+                                                            fontWeight: 700,
+                                                            letterSpacing: '.04em',
+                                                            textTransform: 'uppercase',
+                                                        }}
+                                                    >
+                                                        {m.provider === 'gemini'
+                                                            ? 'Gemini'
+                                                            : 'OpenAI'}
+                                                    </span>
+
+                                                    {m.isDefault && (
+                                                        <span
+                                                            style={{
+                                                                display: 'inline-flex',
+                                                                alignItems: 'center',
+                                                                gap: 5,
+                                                                padding: '2px 10px',
+                                                                borderRadius: 999,
+                                                                background: '#FFE8F1',
+                                                                color: '#FF0066',
+                                                                fontSize: 11,
+                                                                fontWeight: 700,
+                                                                letterSpacing: '.04em',
+                                                                textTransform: 'uppercase',
+                                                            }}
+                                                        >
+                                                            <Check size={12} /> Default
+                                                        </span>
+                                                    )}
+                                                </div>
+
+                                                <div
+                                                    style={{
+                                                        display: 'flex',
+                                                        alignItems: 'center',
+                                                        gap: 12,
+                                                        flexWrap: 'wrap',
+                                                        fontSize: 13,
+                                                        color: '#5C5C66',
+                                                    }}
+                                                >
+                                                    <span>
+                                                        1 ref:{' '}
+                                                        <b style={{ color: '#050507' }}>
+                                                            ${m.cost1Ref.toFixed(3)}
+                                                        </b>
+                                                    </span>
+                                                    <span>·</span>
+                                                    <span>
+                                                        2 refs:{' '}
+                                                        <b style={{ color: '#050507' }}>
+                                                            ${m.cost2Refs.toFixed(3)}
+                                                        </b>
+                                                    </span>
+                                                    <span>·</span>
+                                                    <span>
+                                                        2+ refs:{' '}
+                                                        <b style={{ color: '#050507' }}>
+                                                            ${m.cost3PlusRefs.toFixed(3)}
+                                                        </b>
+                                                    </span>
+                                                    <span>·</span>
+                                                    <span>
+                                                        <b style={{ color: '#050507' }}>
+                                                            {linkedCount}
+                                                        </b>{' '}
+                                                        project{linkedCount === 1 ? '' : 's'}
+                                                    </span>
+                                                </div>
+                                            </div>
+
+                                            <div
+                                                style={{
+                                                    display: 'flex',
+                                                    alignItems: 'center',
+                                                    flexWrap: 'wrap',
+                                                    gap: 8,
+                                                }}
+                                            >
+                                                {!m.isDefault && (
+                                                    <button
+                                                        type="button"
+                                                        className="btn"
+                                                        onClick={() => handleSetDefaultModel(m)}
+                                                    >
+                                                        Set default
+                                                    </button>
+                                                )}
+
+                                                <button
+                                                    type="button"
+                                                    className="btn"
+                                                    onClick={() => startEditingModel(m)}
+                                                >
+                                                    Edit
+                                                </button>
+
                                                 <button
                                                     type="button"
                                                     className="icon-btn danger"
-                                                    aria-label={`Remove model row ${idx + 1}`}
-                                                    title="Remove model"
-                                                    onClick={() => setRemoveModelIdx(idx)}
+                                                    disabled={linkedCount > 0}
+                                                    title={
+                                                        linkedCount > 0
+                                                            ? `Used by ${linkedCount} project(s) — switch those projects to another model first`
+                                                            : 'Delete model'
+                                                    }
+                                                    aria-label={`Delete ${m.name}`}
+                                                    onClick={() => setDeleteTargetModel(m)}
                                                 >
-                                                    <svg
-                                                        aria-hidden="true"
-                                                        width="18"
-                                                        height="18"
-                                                        viewBox="0 0 24 24"
-                                                        fill="none"
-                                                        stroke="currentColor"
-                                                        strokeWidth="2"
-                                                        strokeLinecap="round"
-                                                    >
-                                                        <path d="M6 6l12 12M18 6L6 18" />
-                                                    </svg>
+                                                    <Trash2 size={16} />
                                                 </button>
-                                            </td>
-                                        </tr>
-                                    ))}
-                                </tbody>
-                            </table>
-                        </div>
-
-                        <div style={{ fontSize: 13, color: '#5C5C66' }}>
-                            Changing a price affects cost reports for all projects using that model,
-                            from now on.
-                        </div>
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        )}
                     </section>
 
                     <div style={{ fontSize: 13, color: '#5C5C66' }}>
-                        Portrait limit, AI model, references, and assigned Cloudinary account can
-                        be chosen per project on each project&apos;s page.
+                        Portrait limit, assigned AI model, API key, reference count, and Cloudinary
+                        account are configured per project on each project&apos;s page.
                     </div>
                 </>
             )}
@@ -1527,10 +2130,11 @@ export default function SettingsPage() {
                 </div>
             )}
 
-            {/* Remove Model Confirmation Dialog */}
-            {removeModelIdx !== null && (
+            {/* Delete AI Model Confirmation Dialog */}
+            {deleteTargetModel && (
                 <div
                     className="fadein"
+                    onClick={() => !isDeletingModel && setDeleteTargetModel(null)}
                     style={{
                         position: 'fixed',
                         inset: 0,
@@ -1546,46 +2150,51 @@ export default function SettingsPage() {
                         className="emerge"
                         role="dialog"
                         aria-modal="true"
-                        aria-labelledby="rmm-h"
+                        onClick={e => e.stopPropagation()}
                         style={{
                             width: '100%',
-                            maxWidth: 460,
+                            maxWidth: 440,
                             background: '#F7F5F2',
                             borderRadius: 4,
                             padding: 28,
                             display: 'flex',
                             flexDirection: 'column',
-                            gap: 16,
+                            gap: 14,
                         }}
                     >
-                        <h2 id="rmm-h" style={{ margin: 0, fontSize: 20, fontWeight: 600 }}>
-                            Remove model {costSettings[removeModelIdx]?.modelName || removeModelIdx + 1}?
+                        <span className="lbl" style={{ color: '#C6283D' }}>
+                            Remove AI model
+                        </span>
+                        <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700 }}>
+                            Delete &ldquo;{deleteTargetModel.name}&rdquo;?
                         </h2>
                         <div style={{ fontSize: 14, color: '#5C5C66', lineHeight: 1.5 }}>
-                            Projects using this model will need a new one before their next portrait.
-                            Past cost reports keep the old prices.
+                            No projects are currently linked to this model. Removing it deletes it
+                            from the catalog.
                         </div>
                         <div
                             style={{
                                 display: 'flex',
-                                gap: 12,
-                                flexWrap: 'wrap',
+                                gap: 10,
                                 justifyContent: 'flex-end',
+                                marginTop: 6,
                             }}
                         >
                             <button
                                 type="button"
                                 className="btn"
-                                onClick={() => setRemoveModelIdx(null)}
+                                disabled={isDeletingModel}
+                                onClick={() => setDeleteTargetModel(null)}
                             >
-                                Keep it
+                                Cancel
                             </button>
                             <button
                                 type="button"
                                 className="btn btn-danger"
-                                onClick={handleConfirmRemoveModel}
+                                disabled={isDeletingModel}
+                                onClick={handleConfirmDeleteModel}
                             >
-                                Remove model
+                                {isDeletingModel ? 'Deleting…' : 'Delete model'}
                             </button>
                         </div>
                     </div>

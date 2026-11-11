@@ -71,7 +71,7 @@ export async function POST(
                         {
                             success: false,
                             code: 'PGRST204',
-                            message: "Database migration missing: Run supabase/migrations/20261109153000_add_project_operator_settings.sql in your Supabase SQL Editor to add 'total_printed_copies'.",
+                            message: "Database column 'total_printed_copies' is missing on public.projects.",
                         },
                         { status: 500, headers: corsHeaders }
                     );

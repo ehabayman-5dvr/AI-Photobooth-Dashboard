@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { DEFAULT_AI_MODELS, DEFAULT_OPERATOR_SETTINGS, ProjectOperatorSettings } from '@/types';
+import { SupabaseClient } from '@supabase/supabase-js';
+import { AiProvider, DEFAULT_AI_MODEL_CATALOG } from '@/types';
 import {
     getServerSupabaseClient,
     resolveCloudinaryCredentials,
@@ -16,53 +17,95 @@ export async function OPTIONS() {
     return NextResponse.json({}, { headers: corsHeaders });
 }
 
-function buildFullSettingsPayload(
-    project: any,
-    creds: ResolvedCloudinaryCredentials
-) {
-    const op: ProjectOperatorSettings = project.operator_settings || {};
+interface ResolvedAiModel {
+    id: string | null;
+    name: string;
+    provider: AiProvider;
+}
 
-    const folder =
-        project.cloudinary_folder ||
-        project.cloudinary_tag ||
-        op.cloudinaryFolder ||
-        '';
+async function resolveProjectAiModel(
+    supabase: SupabaseClient,
+    projectRow: any,
+    explicitModelId?: string | null
+): Promise<ResolvedAiModel> {
+    const targetId = explicitModelId || projectRow?.ai_model_id || null;
 
-    const aiModelsList: string[] =
-        Array.isArray(project.ai_models_list) && project.ai_models_list.length > 0
-            ? project.ai_models_list
-            : Array.isArray(op.aiModelsList) && op.aiModelsList.length > 0
-              ? op.aiModelsList
-              : [...DEFAULT_AI_MODELS];
+    try {
+        if (targetId) {
+            const { data: m, error } = await supabase
+                .from('ai_models')
+                .select('id, name, provider')
+                .eq('id', targetId)
+                .single();
 
-    const selectedModel =
-        project.selected_ai_model ||
-        op.openaiModel ||
-        aiModelsList[0] ||
-        DEFAULT_OPERATOR_SETTINGS.openaiModel;
+            if (!error && m && m.name) {
+                return {
+                    id: m.id,
+                    name: m.name,
+                    provider: m.provider === 'gemini' ? 'gemini' : 'openai',
+                };
+            }
+        }
 
-    const enablePrinting =
-        typeof project.enable_printing === 'boolean'
-            ? project.enable_printing
-            : typeof op.enablePrinting === 'boolean'
-              ? op.enablePrinting
-              : DEFAULT_OPERATOR_SETTINGS.enablePrinting;
+        const { data: list, error: listErr } = await supabase
+            .from('ai_models')
+            .select('id, name, provider, is_default')
+            .order('is_default', { ascending: false })
+            .order('created_at', { ascending: true });
 
-    // Dynamically inject resolved Cloudinary account credentials for Booth apps
+        if (!listErr && Array.isArray(list) && list.length > 0) {
+            const matched = list.find(item => item.is_default) || list[0];
+
+            if (matched && matched.name) {
+                return {
+                    id: matched.id,
+                    name: matched.name,
+                    provider: matched.provider === 'gemini' ? 'gemini' : 'openai',
+                };
+            }
+        }
+    } catch {
+        // Fallback to default catalog constant if lookup fails
+    }
+
+    const fallback = DEFAULT_AI_MODEL_CATALOG[0];
     return {
-        ...DEFAULT_OPERATOR_SETTINGS,
-        ...op,
+        id: null,
+        name: fallback.name,
+        provider: fallback.provider,
+    };
+}
+
+function buildCloudSettingsPayload(
+    project: any,
+    creds: ResolvedCloudinaryCredentials,
+    aiModel: ResolvedAiModel,
+    aiApiKey: string
+) {
+    const folder = project.cloudinary_folder || project.cloudinary_tag || '';
+
+    // Return strictly cloud/backend project settings — local booth hardware/UI settings
+    // (printer, camera, timers, kiosk lock, image quality, viewer URL) stay 100% local on the booth.
+    return {
+        dashboardProjectId: project.id,
+        projectName: project.name,
+        isActive: project.is_active !== false,
+        dailyLimit: project.max_usage || 1000,
+        currentGenerations: project.total_usage || 0,
+        projectType: project.project_type || 'desktop',
         cloudinaryAccountId: creds.accountId,
         cloudinaryAccountLabel: creds.accountLabel,
         cloudinaryCloudName: creds.cloudName,
         cloudinaryApiKey: creds.apiKey,
         cloudinaryApiSecret: creds.apiSecret,
         cloudinaryFolder: folder,
-        dashboardProjectId: project.id,
-        openaiModel: selectedModel,
-        aiModelsList,
-        enablePrinting,
-        projectType: project.project_type || 'desktop',
+        aiModelId: aiModel.id,
+        aiModelProvider: aiModel.provider,
+        openaiModel: aiModel.name,
+        aiModelsList: [aiModel.name],
+        openaiApiKey: aiModel.provider === 'openai' ? aiApiKey : '',
+        geminiApiKey: aiModel.provider === 'gemini' ? aiApiKey : '',
+        referenceImagesCount: Math.max(1, Number(project.reference_images_count) || 1),
         totalPrintedCopies: project.total_printed_copies || 0,
     };
 }
@@ -89,13 +132,22 @@ export async function GET(
             );
         }
 
-        const creds = await resolveCloudinaryCredentials({
-            supabase,
-            projectId: id,
-            projectRow: project,
-        });
+        const [creds, aiModel] = await Promise.all([
+            resolveCloudinaryCredentials({
+                supabase,
+                projectId: id,
+                projectRow: project,
+            }),
+            resolveProjectAiModel(supabase, project),
+        ]);
 
-        const settingsPayload = buildFullSettingsPayload(project, creds);
+        const resolvedApiKey = (project.ai_api_key || '').trim();
+        const settingsPayload = buildCloudSettingsPayload(
+            project,
+            creds,
+            aiModel,
+            resolvedApiKey
+        );
 
         return NextResponse.json(settingsPayload, {
             status: 200,
@@ -133,71 +185,42 @@ async function handleUpsertSettings(
             );
         }
 
-        const existingOp: ProjectOperatorSettings = existing.operator_settings || {};
-        const incomingOp: ProjectOperatorSettings = body.operatorSettings || body;
-
         const requestedAccountId =
             body.cloudinaryAccountId !== undefined
                 ? body.cloudinaryAccountId || null
                 : existing.cloudinary_account_id || null;
 
-        const resolvedCreds = await resolveCloudinaryCredentials({
-            supabase,
-            accountId: requestedAccountId,
-            projectRow: existing,
-        });
+        // Only Dashboard requests passing aiModelId can switch the project's AI model
+        const requestedModelId =
+            body.aiModelId !== undefined
+                ? body.aiModelId || null
+                : existing.ai_model_id || null;
+
+        const [resolvedCreds, resolvedAiModel] = await Promise.all([
+            resolveCloudinaryCredentials({
+                supabase,
+                accountId: requestedAccountId,
+                projectRow: existing,
+            }),
+            resolveProjectAiModel(supabase, existing, requestedModelId),
+        ]);
+
+        const updatedAiApiKey =
+            typeof body.aiApiKey === 'string'
+                ? body.aiApiKey.trim()
+                : (existing.ai_api_key ?? '').trim();
 
         const updatedFolder =
             body.cloudinaryFolder ??
             body.cloudinaryTag ??
-            incomingOp.cloudinaryFolder ??
             existing.cloudinary_folder ??
             existing.cloudinary_tag ??
             '';
-
-        const updatedModelsList = Array.isArray(body.aiModelsList)
-            ? body.aiModelsList
-            : Array.isArray(incomingOp.aiModelsList)
-              ? incomingOp.aiModelsList
-              : existing.ai_models_list || [...DEFAULT_AI_MODELS];
-
-        const updatedSelectedModel =
-            body.selectedAiModel ??
-            body.openaiModel ??
-            incomingOp.openaiModel ??
-            existing.selected_ai_model ??
-            DEFAULT_OPERATOR_SETTINGS.openaiModel;
-
-        const updatedEnablePrinting =
-            typeof body.enablePrinting === 'boolean'
-                ? body.enablePrinting
-                : typeof incomingOp.enablePrinting === 'boolean'
-                  ? incomingOp.enablePrinting
-                  : typeof existing.enable_printing === 'boolean'
-                    ? existing.enable_printing
-                    : true;
 
         const updatedProjectType =
             body.projectType === 'web' || body.projectType === 'desktop'
                 ? body.projectType
                 : existing.project_type || 'desktop';
-
-        // Strip raw Cloudinary secrets from persisted operator_settings JSONB
-        const {
-            cloudinaryCloudName: _c1,
-            cloudinaryApiKey: _c2,
-            cloudinaryApiSecret: _c3,
-            ...cleanMergedOp
-        } = {
-            ...DEFAULT_OPERATOR_SETTINGS,
-            ...existingOp,
-            ...incomingOp,
-            cloudinaryFolder: updatedFolder,
-            dashboardProjectId: id,
-            openaiModel: updatedSelectedModel,
-            aiModelsList: updatedModelsList,
-            enablePrinting: updatedEnablePrinting,
-        };
 
         const updatePayload: Record<string, any> = {
             project_type: updatedProjectType,
@@ -207,15 +230,13 @@ async function handleUpsertSettings(
                     : existing.cloudinary_account_id || resolvedCreds.accountId,
             cloudinary_folder: updatedFolder,
             cloudinary_tag: updatedFolder || existing.cloudinary_tag,
-            ai_models_list: updatedModelsList,
-            selected_ai_model: updatedSelectedModel,
-            enable_printing: updatedEnablePrinting,
-            operator_settings: cleanMergedOp,
+            ai_model_id: resolvedAiModel.id,
+            ai_api_key: updatedAiApiKey,
             updated_at: new Date().toISOString(),
         };
 
         if (typeof body.totalPrintedCopies === 'number') {
-            updatePayload.total_printed_copies = body.totalPrintedCopies;
+            updatePayload.total_printed_copies = Math.max(0, Math.floor(body.totalPrintedCopies));
         }
         if (typeof body.name === 'string' && body.name.trim()) {
             updatePayload.name = body.name.trim();
@@ -230,7 +251,10 @@ async function handleUpsertSettings(
             updatePayload.is_active = body.isActive;
         }
         if (typeof body.referenceImagesCount === 'number') {
-            updatePayload.reference_images_count = body.referenceImagesCount;
+            updatePayload.reference_images_count = Math.max(
+                1,
+                Math.round(body.referenceImagesCount)
+            );
         }
 
         const { data: updatedProject, error: updateError } = await supabase
@@ -244,13 +268,22 @@ async function handleUpsertSettings(
             throw updateError;
         }
 
-        const finalCreds = await resolveCloudinaryCredentials({
-            supabase,
-            projectId: id,
-            projectRow: updatedProject,
-        });
+        const [finalCreds, finalAiModel] = await Promise.all([
+            resolveCloudinaryCredentials({
+                supabase,
+                projectId: id,
+                projectRow: updatedProject,
+            }),
+            resolveProjectAiModel(supabase, updatedProject),
+        ]);
 
-        const fullResponse = buildFullSettingsPayload(updatedProject, finalCreds);
+        const finalApiKey = (updatedProject.ai_api_key ?? updatedAiApiKey).trim();
+        const fullResponse = buildCloudSettingsPayload(
+            updatedProject,
+            finalCreds,
+            finalAiModel,
+            finalApiKey
+        );
 
         return NextResponse.json(
             {
