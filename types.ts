@@ -199,6 +199,7 @@ export interface Project {
   enablePrinting?: boolean;
   totalPrintedCopies?: number;
   // Cloudinary
+  cloudinaryAccountId?: string | null;
   cloudinaryCloudName?: string;
   cloudinaryTag?: string;
   cloudinaryFolder?: string;
@@ -213,9 +214,7 @@ export interface Project {
   reference_images_count?: number;
   enable_printing?: boolean;
   total_printed_copies?: number;
-  cloudinary_cloud_name?: string;
-  cloudinary_api_key?: string;
-  cloudinary_api_secret?: string;
+  cloudinary_account_id?: string | null;
   cloudinary_tag?: string;
   cloudinary_folder?: string;
   operator_settings?: ProjectOperatorSettings;
@@ -251,9 +250,17 @@ export interface CloudinaryImage {
   };
   tags?: string[];
 }
+export interface CloudinaryAccount {
+  id: string;
+  label: string;
+  cloudName: string;
+  apiKey: string;
+  apiSecret: string;
+  isDefault: boolean;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
 export interface GlobalSettings {
-  cloudinaryCloudName: string;
-  cloudinaryApiKey: string;
-  cloudinaryApiSecret: string;
   costSettings?: ModelCostSetting[];
 }

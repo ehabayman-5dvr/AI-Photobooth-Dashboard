@@ -25,15 +25,27 @@ CREATE TABLE IF NOT EXISTS public.profiles (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
 );
 
--- 4. GLOBAL SETTINGS
+-- 4. GLOBAL SETTINGS & CLOUDINARY ACCOUNTS
 CREATE TABLE IF NOT EXISTS public.global_settings (
     id TEXT PRIMARY KEY DEFAULT 'current',
-    cloudinary_cloud_name TEXT DEFAULT '',
-    cloudinary_api_key TEXT DEFAULT '',
-    cloudinary_api_secret TEXT DEFAULT '',
     cost_settings JSONB NOT NULL DEFAULT '[{"id": "gpt-image-2.6-flare", "modelName": "gpt-image-2.6-flare", "promptOnly": 0.04, "ref1": 0.06, "ref2": 0.08, "ref3": 0.10}, {"id": "gpt-image-2.5-flare", "modelName": "gpt-image-2.5-flare", "promptOnly": 0.035, "ref1": 0.05, "ref2": 0.065, "ref3": 0.08}, {"id": "gpt-image-2", "modelName": "gpt-image-2", "promptOnly": 0.03, "ref1": 0.045, "ref2": 0.06, "ref3": 0.075}, {"id": "gemini-nano-banana-2.1", "modelName": "gemini-nano-banana-2.1", "promptOnly": 0.02, "ref1": 0.03, "ref2": 0.04, "ref3": 0.05}]'::jsonb,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
 );
+
+CREATE TABLE IF NOT EXISTS public.cloudinary_accounts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    label TEXT NOT NULL,
+    cloud_name TEXT NOT NULL,
+    api_key TEXT NOT NULL,
+    api_secret TEXT NOT NULL,
+    is_default BOOLEAN NOT NULL DEFAULT false,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_cloudinary_accounts_single_default
+    ON public.cloudinary_accounts (is_default)
+    WHERE is_default = true;
 
 -- 5. PROJECTS
 CREATE TABLE IF NOT EXISTS public.projects (
@@ -44,9 +56,7 @@ CREATE TABLE IF NOT EXISTS public.projects (
     total_usage INTEGER NOT NULL DEFAULT 0,
     is_active BOOLEAN NOT NULL DEFAULT true,
     project_type TEXT NOT NULL CHECK (project_type IN ('desktop', 'web')) DEFAULT 'desktop',
-    cloudinary_cloud_name TEXT,
-    cloudinary_api_key TEXT,
-    cloudinary_api_secret TEXT,
+    cloudinary_account_id UUID REFERENCES public.cloudinary_accounts(id) ON DELETE RESTRICT,
     cloudinary_tag TEXT,
     cloudinary_folder TEXT,
     ai_models_list JSONB NOT NULL DEFAULT '["gpt-image-2.6-flare", "gpt-image-2.5-flare", "gpt-image-2", "gemini-nano-banana-2.1"]'::jsonb,
@@ -117,6 +127,26 @@ BEGIN
     SET total_printed_copies = COALESCE(total_printed_copies, 0) + p_copies,
         updated_at = timezone('utc'::text, now())
     WHERE id = p_id;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- RPC: Set Default Cloudinary Account Atomically
+CREATE OR REPLACE FUNCTION public.set_default_cloudinary_account(target_id UUID)
+RETURNS VOID AS $$
+BEGIN
+    IF NOT public.is_admin() THEN
+        RAISE EXCEPTION 'Only admins can change the default Cloudinary account';
+    END IF;
+
+    UPDATE public.cloudinary_accounts
+    SET is_default = false,
+        updated_at = timezone('utc'::text, now())
+    WHERE is_default = true AND id <> target_id;
+
+    UPDATE public.cloudinary_accounts
+    SET is_default = true,
+        updated_at = timezone('utc'::text, now())
+    WHERE id = target_id;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
@@ -212,6 +242,7 @@ CREATE TRIGGER on_allowed_user_inserted_or_updated
 ALTER TABLE public.allowed_users ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.global_settings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.cloudinary_accounts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.projects ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.project_members ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.usage_logs ENABLE ROW LEVEL SECURITY;
@@ -269,6 +300,23 @@ CREATE POLICY "Public read global settings"
 
 CREATE POLICY "Admins update global settings"
     ON public.global_settings
+    FOR ALL
+    TO authenticated
+    USING (public.is_admin())
+    WITH CHECK (public.is_admin());
+
+-- Cloudinary Accounts Policies
+DROP POLICY IF EXISTS "Authenticated read cloudinary_accounts" ON public.cloudinary_accounts;
+DROP POLICY IF EXISTS "Admins manage cloudinary_accounts" ON public.cloudinary_accounts;
+
+CREATE POLICY "Authenticated read cloudinary_accounts"
+    ON public.cloudinary_accounts
+    FOR SELECT
+    TO authenticated
+    USING (true);
+
+CREATE POLICY "Admins manage cloudinary_accounts"
+    ON public.cloudinary_accounts
     FOR ALL
     TO authenticated
     USING (public.is_admin())
@@ -360,8 +408,8 @@ GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO anon, authenticated, service_role
 -- ==============================================================================
 
 -- 12.1 Default Global Settings Row
-INSERT INTO public.global_settings (id, cloudinary_cloud_name, cloudinary_api_key, cloudinary_api_secret)
-VALUES ('current', '', '', '')
+INSERT INTO public.global_settings (id)
+VALUES ('current')
 ON CONFLICT (id) DO NOTHING;
 
 -- 12.2 Whitelist Initial Super Admin

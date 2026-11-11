@@ -9,6 +9,7 @@ import {
     UsageLog,
     UserRole,
     CloudinaryImage,
+    CloudinaryAccount,
     ProjectPlatformType,
     ProjectOperatorSettings,
     DEFAULT_AI_MODELS,
@@ -102,8 +103,9 @@ export default function ProjectDetailPage() {
     const [loadingMoreFeatured, setLoadingMoreFeatured] = useState(false);
     const [loadingMore, setLoadingMore] = useState(false);
 
-    // Cost settings loaded from global_settings
+    // Cost settings & Cloudinary accounts loaded from Supabase
     const [costSettings, setCostSettings] = useState<ModelCostSetting[]>(DEFAULT_MODEL_COSTS);
+    const [cloudinaryAccounts, setCloudinaryAccounts] = useState<CloudinaryAccount[]>([]);
 
     // Overview right-rail Booth Setup quick-edit state
     const [boothLimit, setBoothLimit] = useState(1000);
@@ -119,6 +121,7 @@ export default function ProjectDetailPage() {
         dailyLimit: number;
         referenceImagesCount: number;
         projectType: ProjectPlatformType;
+        cloudinaryAccountId: string;
         cloudinaryCloudName: string;
         cloudinaryApiKey: string;
         cloudinaryApiSecret: string;
@@ -134,6 +137,7 @@ export default function ProjectDetailPage() {
         dailyLimit: 1000,
         referenceImagesCount: 1,
         projectType: 'desktop',
+        cloudinaryAccountId: '',
         cloudinaryCloudName: '',
         cloudinaryApiKey: '',
         cloudinaryApiSecret: '',
@@ -237,23 +241,46 @@ export default function ProjectDetailPage() {
                 return;
             }
 
-            const { data: globalSettings } = await supabase
-                .from('global_settings')
-                .select('*')
-                .eq('id', 'current')
-                .single();
+            const [{ data: globalSettings }, accRes] = await Promise.all([
+                supabase.from('global_settings').select('*').eq('id', 'current').single(),
+                supabase
+                    .from('cloudinary_accounts')
+                    .select('*')
+                    .order('is_default', { ascending: false })
+                    .order('created_at', { ascending: true }),
+            ]);
 
             if (globalSettings && Array.isArray(globalSettings.cost_settings) && globalSettings.cost_settings.length > 0) {
                 setCostSettings(globalSettings.cost_settings);
             }
 
+            let mappedAccounts: CloudinaryAccount[] = [];
+            if (!accRes.error && Array.isArray(accRes.data)) {
+                mappedAccounts = accRes.data.map(a => ({
+                    id: a.id,
+                    label: a.label,
+                    cloudName: a.cloud_name,
+                    apiKey: a.api_key,
+                    apiSecret: a.api_secret,
+                    isDefault: Boolean(a.is_default),
+                }));
+                setCloudinaryAccounts(mappedAccounts);
+            }
+
             const op: ProjectOperatorSettings = p.operator_settings || {};
-            const rawProjectCloudName = p.cloudinary_cloud_name || op.cloudinaryCloudName || '';
-            const rawProjectApiKey = p.cloudinary_api_key || op.cloudinaryApiKey || '';
-            const rawProjectApiSecret = p.cloudinary_api_secret || op.cloudinaryApiSecret || '';
-            const finalCloudName = rawProjectCloudName || globalSettings?.cloudinary_cloud_name || '';
-            const finalApiKey = rawProjectApiKey || globalSettings?.cloudinary_api_key || '';
-            const finalApiSecret = rawProjectApiSecret || globalSettings?.cloudinary_api_secret || '';
+
+            const matchedAccount =
+                (p.cloudinary_account_id
+                    ? mappedAccounts.find(a => a.id === p.cloudinary_account_id)
+                    : null) ||
+                mappedAccounts.find(a => a.isDefault) ||
+                mappedAccounts[0] ||
+                null;
+
+            const resolvedAccountId = matchedAccount?.id || p.cloudinary_account_id || '';
+            const finalCloudName = matchedAccount?.cloudName || '';
+            const finalApiKey = matchedAccount?.apiKey || '';
+            const finalApiSecret = matchedAccount?.apiSecret || '';
             const finalFolder = p.cloudinary_folder || p.cloudinary_tag || op.cloudinaryFolder || '';
 
             const resolvedModelsList: string[] =
@@ -287,9 +314,9 @@ export default function ProjectDetailPage() {
             const mergedOp: Required<ProjectOperatorSettings> = {
                 ...DEFAULT_OPERATOR_SETTINGS,
                 ...op,
-                cloudinaryCloudName: rawProjectCloudName || finalCloudName,
-                cloudinaryApiKey: rawProjectApiKey || finalApiKey,
-                cloudinaryApiSecret: rawProjectApiSecret || finalApiSecret,
+                cloudinaryCloudName: finalCloudName,
+                cloudinaryApiKey: finalApiKey,
+                cloudinaryApiSecret: finalApiSecret,
                 cloudinaryFolder: finalFolder,
                 dashboardProjectId: p.id,
                 openaiModel: resolvedSelectedModel,
@@ -318,6 +345,7 @@ export default function ProjectDetailPage() {
                 enablePrinting: resolvedEnablePrinting,
                 totalPrintedCopies: resolvedTotalPrintedCopies,
                 referenceImagesCount: resolvedRefs,
+                cloudinaryAccountId: resolvedAccountId || null,
                 cloudinaryCloudName: finalCloudName,
                 cloudinaryTag: finalFolder,
                 cloudinaryFolder: finalFolder,
@@ -337,9 +365,10 @@ export default function ProjectDetailPage() {
                 dailyLimit: mapped.dailyLimit,
                 referenceImagesCount: resolvedRefs,
                 projectType: resolvedProjectType,
-                cloudinaryCloudName: rawProjectCloudName || finalCloudName,
-                cloudinaryApiKey: rawProjectApiKey || finalApiKey,
-                cloudinaryApiSecret: rawProjectApiSecret || finalApiSecret,
+                cloudinaryAccountId: resolvedAccountId,
+                cloudinaryCloudName: finalCloudName,
+                cloudinaryApiKey: finalApiKey,
+                cloudinaryApiSecret: finalApiSecret,
                 cloudinaryFolder: finalFolder,
                 aiModelsList: resolvedModelsList,
                 selectedAiModel: resolvedSelectedModel,
@@ -502,12 +531,10 @@ export default function ProjectDetailPage() {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     projectId: project.id,
+                    accountId: project.cloudinaryAccountId || undefined,
                     public_id: img.public_id,
                     tag,
                     action,
-                    cloudName: project.cloudinaryCloudName,
-                    apiKey: project.cloudinaryApiKey,
-                    apiSecret: project.cloudinaryApiSecret,
                 }),
             });
 
@@ -735,10 +762,8 @@ export default function ProjectDetailPage() {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     projectId: project.id,
+                    accountId: project.cloudinaryAccountId || undefined,
                     public_ids: idsToDelete,
-                    cloudName: project.cloudinaryCloudName,
-                    apiKey: project.cloudinaryApiKey,
-                    apiSecret: project.cloudinaryApiSecret,
                 }),
             });
 
@@ -948,11 +973,15 @@ export default function ProjectDetailPage() {
         setSettingsError('');
 
         try {
+            const {
+                cloudinaryCloudName: _c1,
+                cloudinaryApiKey: _c2,
+                cloudinaryApiSecret: _c3,
+                ...cleanOpSettings
+            } = settingsForm.operatorSettings;
+
             const fullOperatorPayload: ProjectOperatorSettings = {
-                ...settingsForm.operatorSettings,
-                cloudinaryCloudName: settingsForm.cloudinaryCloudName.trim(),
-                cloudinaryApiKey: settingsForm.cloudinaryApiKey.trim(),
-                cloudinaryApiSecret: settingsForm.cloudinaryApiSecret.trim(),
+                ...cleanOpSettings,
                 cloudinaryFolder: settingsForm.cloudinaryFolder.trim(),
                 dashboardProjectId: project.id,
                 openaiModel: settingsForm.selectedAiModel,
@@ -969,9 +998,7 @@ export default function ProjectDetailPage() {
                     dailyLimit: settingsForm.dailyLimit,
                     referenceImagesCount: settingsForm.referenceImagesCount,
                     projectType: settingsForm.projectType,
-                    cloudinaryCloudName: settingsForm.cloudinaryCloudName.trim(),
-                    cloudinaryApiKey: settingsForm.cloudinaryApiKey.trim(),
-                    cloudinaryApiSecret: settingsForm.cloudinaryApiSecret.trim(),
+                    cloudinaryAccountId: settingsForm.cloudinaryAccountId || null,
                     cloudinaryFolder: settingsForm.cloudinaryFolder.trim(),
                     aiModelsList: settingsForm.aiModelsList,
                     selectedAiModel: settingsForm.selectedAiModel,
@@ -1058,11 +1085,23 @@ export default function ProjectDetailPage() {
                 ? importedModels
                 : [importedSelectedModel, ...importedModels];
 
+            const importedAcc = parsed.cloudinaryCloudName
+                ? cloudinaryAccounts.find(
+                      a =>
+                          a.cloudName.trim().toLowerCase() ===
+                          String(parsed.cloudinaryCloudName).trim().toLowerCase()
+                  )
+                : null;
+
             setSettingsForm(prev => ({
                 ...prev,
-                cloudinaryCloudName: parsed.cloudinaryCloudName ?? prev.cloudinaryCloudName,
-                cloudinaryApiKey: parsed.cloudinaryApiKey ?? prev.cloudinaryApiKey,
-                cloudinaryApiSecret: parsed.cloudinaryApiSecret ?? prev.cloudinaryApiSecret,
+                cloudinaryAccountId: importedAcc?.id ?? prev.cloudinaryAccountId,
+                cloudinaryCloudName:
+                    importedAcc?.cloudName ?? parsed.cloudinaryCloudName ?? prev.cloudinaryCloudName,
+                cloudinaryApiKey:
+                    importedAcc?.apiKey ?? parsed.cloudinaryApiKey ?? prev.cloudinaryApiKey,
+                cloudinaryApiSecret:
+                    importedAcc?.apiSecret ?? parsed.cloudinaryApiSecret ?? prev.cloudinaryApiSecret,
                 cloudinaryFolder: parsed.cloudinaryFolder ?? prev.cloudinaryFolder,
                 aiModelsList: mergedModels,
                 selectedAiModel: importedSelectedModel,
@@ -3884,31 +3923,68 @@ export default function ProjectDetailPage() {
                         <div
                             style={{
                                 display: 'grid',
-                                gridTemplateColumns: '1fr 1fr',
+                                gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))',
                                 gap: 14,
                                 marginBottom: 16,
                             }}
                         >
                             <div>
                                 <label className="lbl" style={{ display: 'block', marginBottom: 6 }}>
-                                    Cloudinary cloud name
+                                    Cloudinary account
                                 </label>
-                                <input
-                                    className="field"
-                                    value={settingsForm.cloudinaryCloudName}
-                                    onChange={e =>
-                                        setSettingsForm(prev => ({
-                                            ...prev,
-                                            cloudinaryCloudName: e.target.value,
-                                            operatorSettings: {
-                                                ...prev.operatorSettings,
-                                                cloudinaryCloudName: e.target.value,
-                                            },
-                                        }))
-                                    }
-                                    placeholder="e.g. dniredeim"
-                                />
+                                {cloudinaryAccounts.length > 0 ? (
+                                    <select
+                                        className="field"
+                                        value={settingsForm.cloudinaryAccountId}
+                                        onChange={e => {
+                                            const nextId = e.target.value;
+                                            const acc = cloudinaryAccounts.find(
+                                                a => a.id === nextId
+                                            );
+                                            setSettingsForm(prev => ({
+                                                ...prev,
+                                                cloudinaryAccountId: nextId,
+                                                cloudinaryCloudName:
+                                                    acc?.cloudName || prev.cloudinaryCloudName,
+                                                cloudinaryApiKey:
+                                                    acc?.apiKey || prev.cloudinaryApiKey,
+                                                cloudinaryApiSecret:
+                                                    acc?.apiSecret || prev.cloudinaryApiSecret,
+                                                operatorSettings: {
+                                                    ...prev.operatorSettings,
+                                                    cloudinaryCloudName:
+                                                        acc?.cloudName ||
+                                                        prev.operatorSettings.cloudinaryCloudName,
+                                                    cloudinaryApiKey:
+                                                        acc?.apiKey ||
+                                                        prev.operatorSettings.cloudinaryApiKey,
+                                                    cloudinaryApiSecret:
+                                                        acc?.apiSecret ||
+                                                        prev.operatorSettings.cloudinaryApiSecret,
+                                                },
+                                            }));
+                                        }}
+                                    >
+                                        {cloudinaryAccounts.map(acc => (
+                                            <option key={acc.id} value={acc.id}>
+                                                {acc.label} ({acc.cloudName})
+                                                {acc.isDefault ? ' · Default' : ''}
+                                            </option>
+                                        ))}
+                                    </select>
+                                ) : (
+                                    <input
+                                        className="field"
+                                        readOnly
+                                        value={
+                                            settingsForm.cloudinaryCloudName
+                                                ? `${settingsForm.cloudinaryCloudName} (add accounts in Global Settings)`
+                                                : 'No Cloudinary accounts configured yet'
+                                        }
+                                    />
+                                )}
                             </div>
+
                             <div>
                                 <label className="lbl" style={{ display: 'block', marginBottom: 6 }}>
                                     Cloudinary folder / tag
@@ -3929,74 +4005,45 @@ export default function ProjectDetailPage() {
                                     placeholder="e.g. Egyptian-Museum-Photobooth"
                                 />
                             </div>
-                            <div>
-                                <label className="lbl" style={{ display: 'block', marginBottom: 6 }}>
-                                    Cloudinary API Key
-                                </label>
-                                <input
-                                    className="field"
-                                    value={settingsForm.cloudinaryApiKey}
-                                    onChange={e =>
-                                        setSettingsForm(prev => ({
-                                            ...prev,
-                                            cloudinaryApiKey: e.target.value,
-                                            operatorSettings: {
-                                                ...prev.operatorSettings,
-                                                cloudinaryApiKey: e.target.value,
-                                            },
-                                        }))
-                                    }
-                                    placeholder="Leave blank to use Global Settings"
-                                />
-                            </div>
-                            <div>
-                                <label className="lbl" style={{ display: 'block', marginBottom: 6 }}>
-                                    Cloudinary API Secret
-                                </label>
-                                <div style={{ position: 'relative' }}>
-                                    <input
-                                        type={showSecrets.cloudinarySecret ? 'text' : 'password'}
-                                        className="field"
-                                        value={settingsForm.cloudinaryApiSecret}
-                                        onChange={e =>
-                                            setSettingsForm(prev => ({
-                                                ...prev,
-                                                cloudinaryApiSecret: e.target.value,
-                                                operatorSettings: {
-                                                    ...prev.operatorSettings,
-                                                    cloudinaryApiSecret: e.target.value,
-                                                },
-                                            }))
-                                        }
-                                        placeholder="••••••••••••••••"
-                                    />
-                                    <button
-                                        type="button"
-                                        onClick={() =>
-                                            setShowSecrets(p => ({
-                                                ...p,
-                                                cloudinarySecret: !p.cloudinarySecret,
-                                            }))
-                                        }
-                                        style={{
-                                            position: 'absolute',
-                                            right: 10,
-                                            top: '50%',
-                                            transform: 'translateY(-50%)',
-                                            background: 'none',
-                                            border: 0,
-                                            cursor: 'pointer',
-                                            color: 'var(--muted)',
-                                        }}
-                                    >
-                                        {showSecrets.cloudinarySecret ? (
-                                            <EyeOff size={14} />
-                                        ) : (
-                                            <Eye size={14} />
-                                        )}
-                                    </button>
-                                </div>
-                            </div>
+                        </div>
+
+                        <div
+                            style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'space-between',
+                                flexWrap: 'wrap',
+                                gap: 10,
+                                padding: '10px 14px',
+                                borderRadius: 4,
+                                background: '#EEEBE5',
+                                border: '1px solid #E3DFD8',
+                                marginBottom: 16,
+                                fontSize: 13,
+                                color: '#5C5C66',
+                            }}
+                        >
+                            <span>
+                                Active cloud:{' '}
+                                <code
+                                    className="mono"
+                                    style={{ color: '#050507', fontWeight: 600 }}
+                                >
+                                    {settingsForm.cloudinaryCloudName || '—'}
+                                </code>
+                            </span>
+                            {user?.role === UserRole.ADMIN && (
+                                <Link
+                                    href="/settings"
+                                    style={{
+                                        color: '#FF0066',
+                                        fontWeight: 600,
+                                        textDecoration: 'none',
+                                    }}
+                                >
+                                    Manage Cloudinary accounts in Settings →
+                                </Link>
+                            )}
                         </div>
 
                         <div

@@ -6,6 +6,7 @@ import {
     UserRole,
     User,
     ProjectPlatformType,
+    CloudinaryAccount,
     DEFAULT_AI_MODELS,
     DEFAULT_OPERATOR_SETTINGS,
     ModelCostSetting,
@@ -84,6 +85,7 @@ function ProjectsContent() {
     const [lastPortraitByProject, setLastPortraitByProject] = useState<Record<string, string>>({});
     const [users, setUsers] = useState<User[]>([]);
     const [costSettings, setCostSettings] = useState<ModelCostSetting[]>(DEFAULT_MODEL_COSTS);
+    const [cloudinaryAccounts, setCloudinaryAccounts] = useState<CloudinaryAccount[]>([]);
     const [isLoading, setIsLoading] = useState(true);
     const [isSaving, setIsSaving] = useState(false);
     const [teamSearch, setTeamSearch] = useState('');
@@ -99,6 +101,7 @@ function ProjectsContent() {
         selectedAiModel: DEFAULT_OPERATOR_SETTINGS.openaiModel,
         referenceImagesCount: 1,
         assignedUserIds: [] as string[],
+        cloudinaryAccountId: '',
         cloudinaryTag: '',
     });
 
@@ -137,31 +140,64 @@ function ProjectsContent() {
 
             if (pError) throw pError;
 
-            const mappedProjects: Project[] = (projectsData || []).map(p => ({
-                id: p.id,
-                name: p.name,
-                description: p.description || '',
-                dailyLimit: p.max_usage || 1000,
-                currentGenerations: p.total_usage || 0,
-                createdAt: p.created_at,
-                ownerId: p.created_by || '',
-                is_active: p.is_active !== false,
-                status: p.is_active === false ? 'paused' : 'active',
-                projectType: (p.project_type as ProjectPlatformType) || 'desktop',
-                enablePrinting: typeof p.enable_printing === 'boolean' ? p.enable_printing : true,
-                totalPrintedCopies: p.total_printed_copies || 0,
-                selectedAiModel: p.selected_ai_model || 'gpt-image-2.6-flare',
-                referenceImagesCount:
-                    typeof p.reference_images_count === 'number' ? p.reference_images_count : 0,
-                aiModelsList: Array.isArray(p.ai_models_list)
-                    ? p.ai_models_list
-                    : [...DEFAULT_AI_MODELS],
-                cloudinaryCloudName: p.cloudinary_cloud_name,
-                cloudinaryTag: p.cloudinary_folder || p.cloudinary_tag,
-                cloudinaryFolder: p.cloudinary_folder || p.cloudinary_tag,
-                cloudinaryApiKey: p.cloudinary_api_key,
-                cloudinaryApiSecret: p.cloudinary_api_secret,
+            // Fetch Cloudinary Accounts
+            const { data: accData } = await supabase
+                .from('cloudinary_accounts')
+                .select('*')
+                .order('is_default', { ascending: false })
+                .order('created_at', { ascending: true });
+
+            const mappedAccs: CloudinaryAccount[] = (accData || []).map(a => ({
+                id: a.id,
+                label: a.label,
+                cloudName: a.cloud_name,
+                apiKey: a.api_key,
+                apiSecret: a.api_secret,
+                isDefault: Boolean(a.is_default),
             }));
+            setCloudinaryAccounts(mappedAccs);
+
+            const defaultAcc = mappedAccs.find(a => a.isDefault) || mappedAccs[0];
+            if (defaultAcc) {
+                setNewProject(prev => ({
+                    ...prev,
+                    cloudinaryAccountId: prev.cloudinaryAccountId || defaultAcc.id,
+                }));
+            }
+
+            const mappedProjects: Project[] = (projectsData || []).map(p => {
+                const linkedAcc =
+                    (p.cloudinary_account_id
+                        ? mappedAccs.find(a => a.id === p.cloudinary_account_id)
+                        : null) ||
+                    defaultAcc ||
+                    null;
+
+                return {
+                    id: p.id,
+                    name: p.name,
+                    description: p.description || '',
+                    dailyLimit: p.max_usage || 1000,
+                    currentGenerations: p.total_usage || 0,
+                    createdAt: p.created_at,
+                    ownerId: p.created_by || '',
+                    is_active: p.is_active !== false,
+                    status: p.is_active === false ? 'paused' : 'active',
+                    projectType: (p.project_type as ProjectPlatformType) || 'desktop',
+                    enablePrinting: typeof p.enable_printing === 'boolean' ? p.enable_printing : true,
+                    totalPrintedCopies: p.total_printed_copies || 0,
+                    selectedAiModel: p.selected_ai_model || 'gpt-image-2.6-flare',
+                    referenceImagesCount:
+                        typeof p.reference_images_count === 'number' ? p.reference_images_count : 0,
+                    aiModelsList: Array.isArray(p.ai_models_list)
+                        ? p.ai_models_list
+                        : [...DEFAULT_AI_MODELS],
+                    cloudinaryAccountId: p.cloudinary_account_id || linkedAcc?.id || null,
+                    cloudinaryCloudName: linkedAcc?.cloudName || '',
+                    cloudinaryTag: p.cloudinary_folder || p.cloudinary_tag,
+                    cloudinaryFolder: p.cloudinary_folder || p.cloudinary_tag,
+                };
+            });
 
             setProjects(mappedProjects);
 
@@ -243,6 +279,19 @@ function ProjectsContent() {
                 ])
             );
 
+            const chosenAccount =
+                cloudinaryAccounts.find(a => a.id === newProject.cloudinaryAccountId) ||
+                cloudinaryAccounts.find(a => a.isDefault) ||
+                cloudinaryAccounts[0] ||
+                null;
+
+            const {
+                cloudinaryCloudName: _c1,
+                cloudinaryApiKey: _c2,
+                cloudinaryApiSecret: _c3,
+                ...cleanDefaultOperatorSettings
+            } = DEFAULT_OPERATOR_SETTINGS;
+
             const projectData: Record<string, unknown> = {
                 name: newProject.name.trim(),
                 description: newProject.description.trim(),
@@ -250,13 +299,14 @@ function ProjectsContent() {
                 project_type: newProject.projectType,
                 enable_printing:
                     newProject.projectType === 'web' ? false : newProject.enablePrinting,
+                cloudinary_account_id: chosenAccount?.id || null,
                 cloudinary_tag: folderTag,
                 cloudinary_folder: folderTag,
                 ai_models_list: modelList,
                 selected_ai_model: newProject.selectedAiModel,
                 reference_images_count: newProject.referenceImagesCount,
                 operator_settings: {
-                    ...DEFAULT_OPERATOR_SETTINGS,
+                    ...cleanDefaultOperatorSettings,
                     openaiModel: newProject.selectedAiModel,
                     aiModelsList: modelList,
                     cloudinaryFolder: folderTag,
@@ -318,6 +368,8 @@ function ProjectsContent() {
 
             await fetchData();
             setShowModal(false);
+            const defaultAcc =
+                cloudinaryAccounts.find(a => a.isDefault) || cloudinaryAccounts[0];
             setNewProject({
                 name: '',
                 description: '',
@@ -328,6 +380,7 @@ function ProjectsContent() {
                 selectedAiModel: costSettings[0]?.modelName || DEFAULT_OPERATOR_SETTINGS.openaiModel,
                 referenceImagesCount: 1,
                 assignedUserIds: [],
+                cloudinaryAccountId: defaultAcc?.id || '',
                 cloudinaryTag: '',
             });
             if (createdProject?.id) {
@@ -1264,6 +1317,31 @@ function ProjectsContent() {
                                     alignItems: 'end',
                                 }}
                             >
+                                {cloudinaryAccounts.length > 0 && (
+                                    <label style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                                        <span className="lbl" style={{ fontSize: 10 }}>
+                                            Cloudinary account
+                                        </span>
+                                        <select
+                                            className="field"
+                                            value={newProject.cloudinaryAccountId}
+                                            onChange={e =>
+                                                setNewProject(prev => ({
+                                                    ...prev,
+                                                    cloudinaryAccountId: e.target.value,
+                                                }))
+                                            }
+                                        >
+                                            {cloudinaryAccounts.map(acc => (
+                                                <option key={acc.id} value={acc.id}>
+                                                    {acc.label} ({acc.cloudName})
+                                                    {acc.isDefault ? ' · Default' : ''}
+                                                </option>
+                                            ))}
+                                        </select>
+                                    </label>
+                                )}
+
                                 <label style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                                     <span className="lbl" style={{ fontSize: 10 }}>
                                         Cloudinary folder / tag (optional override)
