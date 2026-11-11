@@ -1,19 +1,10 @@
-
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { usePathname, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { UserRole } from '@/types';
-import {
-    LayoutDashboard,
-    Users,
-    FolderKanban,
-    LogOut,
-    Zap,
-    Menu,
-    Settings
-} from 'lucide-react';
 import { AuthProvider, useAuth } from '@/components/AuthContext';
 
 export default function ClientRootLayout({ children }: { children: React.ReactNode }) {
@@ -24,18 +15,115 @@ export default function ClientRootLayout({ children }: { children: React.ReactNo
     );
 }
 
+function getInitials(name: string): string {
+    if (!name) return 'U';
+    const parts = name.trim().split(/\s+/);
+    if (parts.length >= 2) {
+        return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+    }
+    return name.slice(0, 2).toUpperCase();
+}
+
 function LayoutContent({ children }: { children: React.ReactNode }) {
     const { user, isAuthenticated, logout, loading } = useAuth();
-    const [sidebarOpen, setSidebarOpen] = useState(false);
+    // Separate desktop rail state (default true = 88px rail) and mobile dropdown state (default false)
+    const [navMini, setNavMini] = useState(true);
+    const [mobileOpen, setMobileOpen] = useState(false);
+    const [isMobileViewport, setIsMobileViewport] = useState(false);
+
+    // Profile popover / logout menu state
+    const [profileMenuOpen, setProfileMenuOpen] = useState(false);
+    const [isLoggingOut, setIsLoggingOut] = useState(false);
+    const [menuStyle, setMenuStyle] = useState<React.CSSProperties>({});
+    const meBtnRef = useRef<HTMLButtonElement | null>(null);
+    const menuRef = useRef<HTMLDivElement | null>(null);
+
+    // Interactive cursor glow ref (updates CSS vars directly without React re-renders)
+    const groundRef = useRef<HTMLDivElement | null>(null);
+    const rafRef = useRef<number | null>(null);
+    const lastTimeRef = useRef<number>(0);
+    const lastPosRef = useRef<{ x: number; y: number }>({ x: 1100, y: 140 });
+
     const pathname = usePathname();
     const router = useRouter();
 
-    const navItems = [
-        { label: 'Dashboard', icon: <LayoutDashboard size={20} />, path: '/', roles: [UserRole.ADMIN, UserRole.REGULAR] },
-        { label: 'Projects', icon: <FolderKanban size={20} />, path: '/projects', roles: [UserRole.ADMIN, UserRole.REGULAR] },
-        { label: 'User Management', icon: <Users size={20} />, path: '/users', roles: [UserRole.ADMIN] },
-        { label: 'Global Settings', icon: <Settings size={20} />, path: '/settings', roles: [UserRole.ADMIN] },
-    ];
+    useEffect(() => {
+        const mql = window.matchMedia('(max-width: 900px)');
+        const updateViewport = () => setIsMobileViewport(mql.matches);
+        updateViewport();
+        mql.addEventListener('change', updateViewport);
+        return () => mql.removeEventListener('change', updateViewport);
+    }, []);
+
+    useEffect(() => {
+        setMobileOpen(false);
+        setProfileMenuOpen(false);
+    }, [pathname]);
+
+    const updateProfileMenuPosition = useCallback(() => {
+        const btn = meBtnRef.current;
+        if (!btn) return;
+        const rect = btn.getBoundingClientRect();
+
+        if (isMobileViewport) {
+            const width = Math.min(Math.max(rect.width, 220), window.innerWidth - 32);
+            setMenuStyle({
+                position: 'fixed',
+                left: Math.max(16, Math.min(rect.left, window.innerWidth - width - 16)),
+                top: rect.bottom + 8,
+                width,
+            });
+        } else if (navMini) {
+            setMenuStyle({
+                position: 'fixed',
+                left: rect.right + 14,
+                bottom: Math.max(16, window.innerHeight - rect.bottom),
+                minWidth: 228,
+            });
+        } else {
+            setMenuStyle({
+                position: 'fixed',
+                left: rect.left,
+                bottom: Math.max(16, window.innerHeight - rect.top + 8),
+                width: Math.max(rect.width, 216),
+            });
+        }
+    }, [isMobileViewport, navMini]);
+
+    useEffect(() => {
+        if (!profileMenuOpen) return;
+        updateProfileMenuPosition();
+
+        const handleOutsideClick = (e: MouseEvent) => {
+            const target = e.target as Node;
+            if (
+                meBtnRef.current?.contains(target) ||
+                menuRef.current?.contains(target)
+            ) {
+                return;
+            }
+            setProfileMenuOpen(false);
+        };
+
+        const handleKeyDown = (e: KeyboardEvent) => {
+            if (e.key === 'Escape') {
+                setProfileMenuOpen(false);
+                meBtnRef.current?.focus();
+            }
+        };
+
+        window.addEventListener('mousedown', handleOutsideClick);
+        window.addEventListener('keydown', handleKeyDown);
+        window.addEventListener('resize', updateProfileMenuPosition);
+        window.addEventListener('scroll', updateProfileMenuPosition, true);
+
+        return () => {
+            window.removeEventListener('mousedown', handleOutsideClick);
+            window.removeEventListener('keydown', handleKeyDown);
+            window.removeEventListener('resize', updateProfileMenuPosition);
+            window.removeEventListener('scroll', updateProfileMenuPosition, true);
+        };
+    }, [profileMenuOpen, updateProfileMenuPosition]);
 
     useEffect(() => {
         if (!loading && !isAuthenticated && pathname !== '/login') {
@@ -43,12 +131,71 @@ function LayoutContent({ children }: { children: React.ReactNode }) {
         }
     }, [loading, isAuthenticated, pathname, router]);
 
+    const handleMouseMove = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+        const rect = e.currentTarget.getBoundingClientRect();
+        const x = Math.round(e.clientX - rect.left);
+        const y = Math.round(e.clientY - rect.top);
+        const now = Date.now();
+        if (
+            rafRef.current !== null ||
+            now - lastTimeRef.current < 60 ||
+            Math.abs(x - lastPosRef.current.x) + Math.abs(y - lastPosRef.current.y) < 24
+        ) {
+            return;
+        }
+        lastTimeRef.current = now;
+        lastPosRef.current = { x, y };
+        rafRef.current = requestAnimationFrame(() => {
+            rafRef.current = null;
+            if (groundRef.current) {
+                groundRef.current.style.setProperty('--glow-x', `${x}px`);
+                groundRef.current.style.setProperty('--glow-y', `${y}px`);
+            }
+        });
+    }, []);
+
+    const toggleNav = () => {
+        const isMobile = typeof window !== 'undefined' && window.matchMedia('(max-width: 900px)').matches;
+        setIsMobileViewport(isMobile);
+        if (isMobile) {
+            setMobileOpen(prev => !prev);
+        } else {
+            setNavMini(prev => !prev);
+        }
+        setProfileMenuOpen(false);
+    };
+
     if (loading) {
         return (
-            <div className="min-h-screen bg-slate-50 flex items-center justify-center">
-                <div className="flex flex-col items-center gap-4">
-                    <Zap className="text-indigo-600 animate-pulse" size={48} fill="currentColor" />
-                    <p className="text-slate-500 font-medium animate-pulse">Initializing Dashboard...</p>
+            <div
+                className="ground"
+                style={{
+                    minHeight: '100vh',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    padding: 24,
+                }}
+            >
+                <div
+                    className="card emerge"
+                    style={{
+                        maxWidth: 360,
+                        width: '100%',
+                        alignItems: 'center',
+                        textAlign: 'center',
+                        padding: '40px 32px',
+                    }}
+                >
+                    <img
+                        src="/5dvr-logo.png"
+                        alt="5dVR"
+                        width={44}
+                        height={44}
+                        style={{ width: 44, height: 44, display: 'block' }}
+                    />
+                    <span className="lbl">AI Photobooth</span>
+                    <span style={{ fontSize: 14, color: '#5C5C66' }}>Loading workspace…</span>
                 </div>
             </div>
         );
@@ -60,32 +207,57 @@ function LayoutContent({ children }: { children: React.ReactNode }) {
 
     if (!isAuthenticated) return null;
 
-    if (!isAuthenticated) return null;
-
     if (!user) {
         return (
-            <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6 text-center">
-                <div className="max-w-md w-full bg-white p-8 rounded-3xl border border-slate-200 shadow-sm animate-in fade-in zoom-in-95 duration-300">
-                    <div className="w-16 h-16 bg-amber-50 text-amber-500 rounded-full flex items-center justify-center mx-auto mb-4">
-                        <Users size={32} />
+            <div
+                className="ground"
+                style={{
+                    minHeight: '100vh',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    padding: 24,
+                }}
+            >
+                <div
+                    className="card emerge"
+                    style={{
+                        maxWidth: 440,
+                        width: '100%',
+                        padding: '40px 36px',
+                        gap: 20,
+                    }}
+                >
+                    <div className="brand">
+                        <img
+                            src="/5dvr-logo.png"
+                            alt="5dVR"
+                            width={40}
+                            height={40}
+                            style={{ width: 40, height: 40, display: 'block', flex: 'none' }}
+                        />
+                        <span style={{ fontSize: 13, fontWeight: 600, letterSpacing: '.2em', textTransform: 'uppercase' }}>
+                            AI Photobooth
+                        </span>
                     </div>
-                    <h2 className="text-xl font-bold text-slate-800 mb-2">Access Verification</h2>
-                    <p className="text-slate-500 text-sm mb-6 leading-relaxed">
-                        We found your account, but couldn't verify your dashboard permissions.
-                        This can happen if you are not authorized, or if your connection timed out while switching tabs.
+                    <h2 style={{ margin: 0, fontSize: 22, fontWeight: 600 }}>Access verification</h2>
+                    <p style={{ margin: 0, fontSize: 14, color: '#5C5C66', lineHeight: 1.5 }}>
+                        We found your Google account, but couldn&apos;t verify your dashboard access. Ask an admin to invite your email, or retry the connection.
                     </p>
-                    <div className="space-y-3">
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                         <button
+                            type="button"
                             onClick={() => window.location.reload()}
-                            className="w-full py-3 bg-indigo-600 text-white rounded-2xl font-bold hover:bg-indigo-700 transition-all active:scale-95 shadow-lg shadow-indigo-100"
+                            className="btn btn-pink"
                         >
-                            Retry Connection
+                            Retry connection
                         </button>
                         <button
+                            type="button"
                             onClick={logout}
-                            className="w-full py-3 bg-white text-slate-600 border border-slate-200 rounded-2xl font-bold hover:bg-slate-50 transition-all active:scale-95"
+                            className="btn"
                         >
-                            Sign in with Different Email
+                            Sign in with another account
                         </button>
                     </div>
                 </div>
@@ -93,90 +265,352 @@ function LayoutContent({ children }: { children: React.ReactNode }) {
         );
     }
 
+    const isAdmin = user.role === UserRole.ADMIN;
+    const roleLabel = isAdmin ? 'Super admin' : 'Regular user';
+    const userInitials = getInitials(user.name || user.email);
+
+    // Build sidebar class based on viewport and state
+    const sideClass = isMobileViewport
+        ? `side${mobileOpen ? ' open' : ''}`
+        : `side${navMini ? ' mini' : ' open'}`;
+
+    const navLabel = isMobileViewport
+        ? mobileOpen
+            ? 'Close menu'
+            : 'Open menu'
+        : navMini
+            ? 'Expand menu'
+            : 'Collapse menu';
+
+    const navExpanded = isMobileViewport ? mobileOpen : !navMini;
+
+    const isOverviewActive = pathname === '/';
+    const isProjectsActive = pathname.startsWith('/projects');
+    const isUsersActive = pathname.startsWith('/users');
+    const isSettingsActive = pathname.startsWith('/settings');
+
     return (
-        <div className="flex h-screen bg-slate-50 overflow-hidden">
-            {/* Sidebar Mobile Overlay */}
-            {sidebarOpen && (
-                <div
-                    className="fixed inset-0 bg-slate-900/50 z-40 lg:hidden"
-                    onClick={() => setSidebarOpen(false)}
-                />
-            )}
-
-            {/* Sidebar */}
-            <aside className={`
-        fixed inset-y-0 left-0 z-50 w-64 bg-white border-r border-slate-200 transform transition-transform duration-200 ease-in-out lg:relative lg:translate-x-0
-        ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}
-      `}>
-                <div className="flex flex-col h-full">
-                    <div className="p-6 flex items-center gap-3">
-                        <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center text-white shadow-lg shadow-indigo-200">
-                            <Zap size={18} fill="currentColor" />
-                        </div>
-                        <span className="font-bold text-xl text-slate-800 tracking-tight">AI Booth</span>
-                    </div>
-
-                    <nav className="flex-1 px-4 py-4 space-y-1">
-                        {navItems.filter(item => item.roles.includes(user.role)).map((item) => (
-                            <Link
-                                key={item.path}
-                                href={item.path}
-                                onClick={() => setSidebarOpen(false)}
-                                className={`
-                  flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200
-                  ${pathname === item.path
-                                        ? 'bg-indigo-50 text-indigo-600 font-semibold'
-                                        : 'text-slate-500 hover:bg-slate-50 hover:text-slate-700'}
-                `}
-                            >
-                                {item.icon}
-                                {item.label}
-                            </Link>
-                        ))}
-                    </nav>
-
-                    <div className="p-4 border-t border-slate-100">
-                        <div className="mb-4 flex items-center gap-3 px-4 py-2">
-                            <div className="w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center text-slate-600">
-                                {user.name.charAt(0)}
-                            </div>
-                            <div className="flex-1 overflow-hidden">
-                                <p className="text-sm font-semibold text-slate-800 truncate">{user.name}</p>
-                                <p className="text-xs text-slate-500 truncate capitalize">{user.role.toLowerCase()}</p>
-                            </div>
-                        </div>
-                        <button
-                            onClick={logout}
-                            className="w-full flex items-center gap-3 px-4 py-3 text-red-500 hover:bg-red-50 rounded-xl transition-colors"
-                        >
-                            <LogOut size={20} />
-                            Logout
-                        </button>
-                    </div>
+        <div
+            ref={groundRef}
+            className="ground"
+            onMouseMove={handleMouseMove}
+            style={
+                {
+                    '--glow-x': '1100px',
+                    '--glow-y': '140px',
+                    backgroundImage:
+                        'radial-gradient(392px circle at var(--glow-x) var(--glow-y), rgba(255,0,102,.17), rgba(255,0,102,0) 70%), radial-gradient(circle at 1px 1px, rgba(5,5,7,.07) 1px, transparent 0)',
+                    backgroundSize: 'auto, 24px 24px',
+                    minHeight: '100vh',
+                    display: 'flex',
+                    flexWrap: 'wrap',
+                    color: '#050507',
+                } as React.CSSProperties
+            }
+        >
+            <aside className={sideClass}>
+                <div className="brandwrap">
+                    <Link
+                        className="brand"
+                        href="/"
+                        aria-label="AI Photobooth, go to Overview"
+                    >
+                        <img
+                            src="/5dvr-logo.png"
+                            alt="5dVR"
+                            width={40}
+                            height={40}
+                            style={{ width: 40, height: 40, display: 'block', flex: 'none' }}
+                        />
+                        <span className="brand-title">
+                            AI Photobooth
+                        </span>
+                    </Link>
+                    <button
+                        className="hamb"
+                        type="button"
+                        aria-label={navLabel}
+                        aria-expanded={navExpanded}
+                        onClick={toggleNav}
+                    >
+                        <span aria-hidden="true"></span>
+                        <span aria-hidden="true"></span>
+                        <span aria-hidden="true"></span>
+                    </button>
                 </div>
+
+                <nav className="sidenav" aria-label="Main">
+                    <Link
+                        className={`nav${isOverviewActive ? ' on' : ''}`}
+                        href="/"
+                        title="Overview"
+                        aria-current={isOverviewActive ? 'page' : undefined}
+                    >
+                        <svg
+                            aria-hidden="true"
+                            width="18"
+                            height="18"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="1.8"
+                            strokeLinejoin="round"
+                        >
+                            <rect x="4" y="4" width="7" height="7" rx="1"></rect>
+                            <rect x="13" y="4" width="7" height="7" rx="1"></rect>
+                            <rect x="4" y="13" width="7" height="7" rx="1"></rect>
+                            <rect x="13" y="13" width="7" height="7" rx="1"></rect>
+                        </svg>
+                        Overview
+                    </Link>
+
+                    <Link
+                        className={`nav${isProjectsActive ? ' on' : ''}`}
+                        href="/projects"
+                        title="Projects"
+                        aria-current={isProjectsActive ? 'page' : undefined}
+                    >
+                        <svg
+                            aria-hidden="true"
+                            width="18"
+                            height="18"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="1.8"
+                            strokeLinejoin="round"
+                        >
+                            <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path>
+                        </svg>
+                        Projects
+                    </Link>
+
+                    {isAdmin && (
+                        <>
+                            <Link
+                                className={`nav${isUsersActive ? ' on' : ''}`}
+                                href="/users"
+                                title="People & access"
+                                aria-current={isUsersActive ? 'page' : undefined}
+                            >
+                                <svg
+                                    aria-hidden="true"
+                                    width="18"
+                                    height="18"
+                                    viewBox="0 0 24 24"
+                                    fill="none"
+                                    stroke="currentColor"
+                                    strokeWidth="1.8"
+                                    strokeLinecap="round"
+                                >
+                                    <circle cx="9" cy="8" r="3.5"></circle>
+                                    <path d="M3 20a6 6 0 0 1 12 0"></path>
+                                    <path d="M16 4.5a3.5 3.5 0 0 1 0 7M18 20a6 6 0 0 0-3-5.2"></path>
+                                </svg>
+                                People &amp; access
+                            </Link>
+
+                            <Link
+                                className={`nav${isSettingsActive ? ' on' : ''}`}
+                                href="/settings"
+                                title="Settings"
+                                aria-current={isSettingsActive ? 'page' : undefined}
+                            >
+                                <svg
+                                    aria-hidden="true"
+                                    width="18"
+                                    height="18"
+                                    viewBox="0 0 24 24"
+                                    fill="none"
+                                    stroke="currentColor"
+                                    strokeWidth="1.8"
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                >
+                                    <path d="M12.2 2h-.4a2 2 0 0 0-2 2v.2a2 2 0 0 1-1 1.7l-.4.3a2 2 0 0 1-2 0l-.2-.1a2 2 0 0 0-2.7.7l-.2.4a2 2 0 0 0 .7 2.7l.2.1a2 2 0 0 1 1 1.7v.5a2 2 0 0 1-1 1.7l-.2.1a2 2 0 0 0-.7 2.7l.2.4a2 2 0 0 0 2.7.7l.2-.1a2 2 0 0 1 2 0l.4.3a2 2 0 0 1 1 1.7v.2a2 2 0 0 0 2 2h.4a2 2 0 0 0 2-2v-.2a2 2 0 0 1 1-1.7l.4-.3a2 2 0 0 1 2 0l.2.1a2 2 0 0 0 2.7-.7l.2-.4a2 2 0 0 0-.7-2.7l-.2-.1a2 2 0 0 1-1-1.7v-.5a2 2 0 0 1 1-1.7l.2-.1a2 2 0 0 0 .7-2.7l-.2-.4a2 2 0 0 0-2.7-.7l-.2.1a2 2 0 0 1-2 0l-.4-.3a2 2 0 0 1-1-1.7V4a2 2 0 0 0-2-2z"></path>
+                                    <circle cx="12" cy="12" r="3"></circle>
+                                </svg>
+                                Settings
+                            </Link>
+                        </>
+                    )}
+                </nav>
+
+                <div className="sidefoot">
+                    <button
+                        ref={meBtnRef}
+                        type="button"
+                        className="me"
+                        title={`${user.name} · ${roleLabel}`}
+                        aria-haspopup="menu"
+                        aria-expanded={profileMenuOpen}
+                        onClick={() => {
+                            if (!profileMenuOpen) updateProfileMenuPosition();
+                            setProfileMenuOpen(prev => !prev);
+                        }}
+                    >
+                        <span className="me-av" aria-hidden="true">
+                            {userInitials}
+                        </span>
+                        <span className="me-txt">
+                            <span className="me-name">{user.name}</span>
+                            <span className="me-role">{roleLabel}</span>
+                        </span>
+                        <svg
+                            className="me-chev"
+                            aria-hidden="true"
+                            width="14"
+                            height="14"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="#5C5C66"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            style={{
+                                flex: 'none',
+                                transform: profileMenuOpen ? 'rotate(180deg)' : 'none',
+                                transition: 'transform 0.25s cubic-bezier(0.16, 1, 0.3, 1)',
+                            }}
+                        >
+                            <polyline points="6 9 12 15 18 9"></polyline>
+                        </svg>
+                    </button>
+                </div>
+
+                {profileMenuOpen &&
+                    typeof document !== 'undefined' &&
+                    createPortal(
+                        <div
+                            ref={menuRef}
+                            className="me-menu"
+                            role="menu"
+                            aria-label="Account menu"
+                            style={menuStyle}
+                        >
+                            <div className="me-menu-head">
+                                <span
+                                    style={{
+                                        fontSize: 13,
+                                        fontWeight: 700,
+                                        color: '#050507',
+                                        whiteSpace: 'nowrap',
+                                        overflow: 'hidden',
+                                        textOverflow: 'ellipsis',
+                                    }}
+                                >
+                                    {user.name}
+                                </span>
+                                <span
+                                    style={{
+                                        fontSize: 11,
+                                        color: '#5C5C66',
+                                        whiteSpace: 'nowrap',
+                                        overflow: 'hidden',
+                                        textOverflow: 'ellipsis',
+                                    }}
+                                >
+                                    {user.email}
+                                </span>
+                                <span
+                                    className="lbl"
+                                    style={{
+                                        marginTop: 4,
+                                        fontSize: 9,
+                                        letterSpacing: '.2em',
+                                        color: isAdmin ? '#FF0066' : '#5C5C66',
+                                    }}
+                                >
+                                    {roleLabel}
+                                </span>
+                            </div>
+                            <button
+                                type="button"
+                                role="menuitem"
+                                className="me-logout"
+                                disabled={isLoggingOut}
+                                onClick={async () => {
+                                    setIsLoggingOut(true);
+                                    await logout();
+                                }}
+                            >
+                                <svg
+                                    aria-hidden="true"
+                                    width="16"
+                                    height="16"
+                                    viewBox="0 0 24 24"
+                                    fill="none"
+                                    stroke="currentColor"
+                                    strokeWidth="2"
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                >
+                                    <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+                                    <polyline points="16 17 21 12 16 7"></polyline>
+                                    <line x1="21" y1="12" x2="9" y2="12"></line>
+                                </svg>
+                                {isLoggingOut ? 'Logging out…' : 'Log out'}
+                            </button>
+                        </div>,
+                        document.body
+                    )}
             </aside>
 
-            {/* Main Content */}
-            <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
-                <header className="h-16 bg-white/80 backdrop-blur-sm border-b border-slate-200 px-6 flex items-center justify-between sticky top-0 z-30">
-                    <button
-                        className="lg:hidden p-2 text-slate-500"
-                        onClick={() => setSidebarOpen(true)}
-                    >
-                        <Menu size={24} />
-                    </button>
-                    <div className="flex items-center gap-2">
-                        <h1 className="text-lg font-semibold text-slate-800">
-                            {navItems.find(n => n.path === pathname)?.label || 'Project Details'}
-                        </h1>
-                    </div>
-                </header>
+            <main
+                className="app-main"
+                style={{
+                    flex: '999 1 560px',
+                    minWidth: 0,
+                    boxSizing: 'border-box',
+                    padding: '48px clamp(20px, 5vw, 80px) 80px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 40,
+                }}
+            >
+                {children}
 
-                <div className="flex-1 overflow-y-auto p-4 md:p-8">
-                    <div className="max-w-7xl mx-auto">
-                        {children}
-                    </div>
-                </div>
+                <footer
+                    style={{
+                        marginTop: 'auto',
+                        paddingTop: 48,
+                        display: 'flex',
+                        justifyContent: 'center',
+                    }}
+                >
+                    <a
+                        className="powered"
+                        href="https://5d-vr.com"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        aria-label="Powered by 5dVR (opens 5d-vr.com in a new tab)"
+                    >
+                        <span className="lbl" style={{ fontSize: 10, letterSpacing: '.28em' }}>
+                            Powered by
+                        </span>
+                        <img
+                            src="/5dvr-logo.png"
+                            alt="5dVR"
+                            width={32}
+                            height={32}
+                            style={{ width: 32, height: 32, display: 'block' }}
+                        />
+                        <svg
+                            className="ext"
+                            aria-hidden="true"
+                            width="14"
+                            height="14"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                        >
+                            <path d="M7 17L17 7M9 7h8v8"></path>
+                        </svg>
+                    </a>
+                </footer>
             </main>
         </div>
     );

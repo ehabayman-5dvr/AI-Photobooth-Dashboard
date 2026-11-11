@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS public.global_settings (
     cloudinary_cloud_name TEXT DEFAULT '',
     cloudinary_api_key TEXT DEFAULT '',
     cloudinary_api_secret TEXT DEFAULT '',
+    cost_settings JSONB NOT NULL DEFAULT '[{"id": "gpt-image-2.6-flare", "modelName": "gpt-image-2.6-flare", "promptOnly": 0.04, "ref1": 0.06, "ref2": 0.08, "ref3": 0.10}, {"id": "gpt-image-2.5-flare", "modelName": "gpt-image-2.5-flare", "promptOnly": 0.035, "ref1": 0.05, "ref2": 0.065, "ref3": 0.08}, {"id": "gpt-image-2", "modelName": "gpt-image-2", "promptOnly": 0.03, "ref1": 0.045, "ref2": 0.06, "ref3": 0.075}, {"id": "gemini-nano-banana-2.1", "modelName": "gemini-nano-banana-2.1", "promptOnly": 0.02, "ref1": 0.03, "ref2": 0.04, "ref3": 0.05}]'::jsonb,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
 );
 
@@ -42,10 +43,18 @@ CREATE TABLE IF NOT EXISTS public.projects (
     max_usage INTEGER NOT NULL DEFAULT 1000,
     total_usage INTEGER NOT NULL DEFAULT 0,
     is_active BOOLEAN NOT NULL DEFAULT true,
+    project_type TEXT NOT NULL CHECK (project_type IN ('desktop', 'web')) DEFAULT 'desktop',
     cloudinary_cloud_name TEXT,
     cloudinary_api_key TEXT,
     cloudinary_api_secret TEXT,
     cloudinary_tag TEXT,
+    cloudinary_folder TEXT,
+    ai_models_list JSONB NOT NULL DEFAULT '["gpt-image-2.6-flare", "gpt-image-2.5-flare", "gpt-image-2", "gemini-nano-banana-2.1"]'::jsonb,
+    selected_ai_model TEXT NOT NULL DEFAULT 'gpt-image-2.6-flare',
+    reference_images_count INTEGER NOT NULL DEFAULT 0,
+    enable_printing BOOLEAN NOT NULL DEFAULT true,
+    total_printed_copies INTEGER NOT NULL DEFAULT 0,
+    operator_settings JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_by UUID REFERENCES public.profiles(id) ON DELETE SET NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
@@ -95,6 +104,17 @@ RETURNS VOID AS $$
 BEGIN
     UPDATE public.projects
     SET total_usage = COALESCE(total_usage, 0) + p_amount,
+        updated_at = timezone('utc'::text, now())
+    WHERE id = p_id;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- RPC: Increment Project Prints
+CREATE OR REPLACE FUNCTION public.increment_project_prints(p_id UUID, p_copies INTEGER DEFAULT 1)
+RETURNS VOID AS $$
+BEGIN
+    UPDATE public.projects
+    SET total_printed_copies = COALESCE(total_printed_copies, 0) + p_copies,
         updated_at = timezone('utc'::text, now())
     WHERE id = p_id;
 END;

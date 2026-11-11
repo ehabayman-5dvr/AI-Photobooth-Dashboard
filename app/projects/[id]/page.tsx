@@ -1,46 +1,86 @@
-
 'use client';
 
 import React, { useState, useEffect, useMemo } from 'react';
 import { createPortal } from 'react-dom';
-import { useParams, useRouter } from 'next/navigation';
-import { Project, UsageLog, UserRole, CloudinaryImage } from '@/types';
+import { useParams, useRouter, useSearchParams } from 'next/navigation';
+import Link from 'next/link';
+import {
+    Project,
+    UsageLog,
+    UserRole,
+    CloudinaryImage,
+    ProjectPlatformType,
+    ProjectOperatorSettings,
+    DEFAULT_AI_MODELS,
+    DEFAULT_OPERATOR_SETTINGS,
+    DEFAULT_MODEL_COSTS,
+    ModelCostSetting,
+    AutoRestartMode,
+} from '@/types';
 import { supabase } from '@/utils/supabase';
 import {
-    ArrowLeft,
-    Settings,
     Trash2,
-    Play,
-    History,
     Copy,
     Check,
     Cpu,
     RefreshCw,
-    Zap,
-    Activity,
-    Image as ImageIcon,
-    ExternalLink,
     Download,
-    Info,
     Loader2,
-    Users,
-    UserPlus,
-    UserMinus,
-    Search,
-    Calendar,
-    ArrowUpDown,
-    Clock,
     Star,
-    StarOff,
-    X
+    X,
+    Monitor,
+    Globe,
+    Printer,
+    Cloud,
+    ShieldCheck,
+    Camera,
+    Sparkles,
+    Upload,
+    Plus,
+    Eye,
+    EyeOff,
+    Save,
+    AlertCircle,
+    QrCode,
 } from 'lucide-react';
-import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { useAuth } from '@/components/AuthContext';
+
+type ProjectTab = 'overview' | 'gallery' | 'featured' | 'settings';
+type ChartRange = 'event' | '7d' | '30d' | '90d' | 'all' | 'custom';
+
+const AVATAR_TINTS: Array<[string, string]> = [
+    ['#FFE8F0', '#FF0066'],
+    ['#E8EEF5', '#2A4B7C'],
+    ['#E6F2EC', '#1F6B4A'],
+    ['#F3EBF6', '#6B3FA0'],
+    ['#F6EFE5', '#9A5B13'],
+];
+
+function getInitials(name?: string, email?: string) {
+    const src = (name || email || 'U').trim();
+    const parts = src.split(/\s+/);
+    if (parts.length >= 2) {
+        return (parts[0][0] + parts[1][0]).toUpperCase();
+    }
+    return src.slice(0, 2).toUpperCase();
+}
+
+function getProjectBadgeState(p: Project): {
+    label: string;
+    pillClass: string;
+    isLive?: boolean;
+} {
+    if (p.is_active === false || p.status === 'paused') {
+        return { label: 'Finished', pillClass: 'p-done' };
+    }
+    return { label: 'In use', pillClass: 'p-use', isLive: true };
+}
 
 export default function ProjectDetailPage() {
     const params = useParams();
     const id = params?.id as string;
     const router = useRouter();
+    const searchParams = useSearchParams();
     const { user } = useAuth();
 
     const [project, setProject] = useState<Project | null>(null);
@@ -48,8 +88,12 @@ export default function ProjectDetailPage() {
     const [images, setImages] = useState<CloudinaryImage[]>([]);
     const [loadingImages, setLoadingImages] = useState(false);
     const [copied, setCopied] = useState(false);
+    const [copiedId, setCopiedId] = useState(false);
+    const [copiedSyncUrl, setCopiedSyncUrl] = useState(false);
+    const [copiedPrintUrl, setCopiedPrintUrl] = useState(false);
     const [isSimulating, setIsSimulating] = useState(false);
-    const [activeTab, setActiveTab] = useState<'overview' | 'images' | 'featured' | 'logs'>('overview');
+    const [isSimulatingPrint, setIsSimulatingPrint] = useState(false);
+    const [activeTab, setActiveTab] = useState<ProjectTab>('overview');
     const [origin, setOrigin] = useState('');
     const [nextCursor, setNextCursor] = useState<string | null>(null);
     const [featuredImages, setFeaturedImages] = useState<CloudinaryImage[]>([]);
@@ -57,43 +101,126 @@ export default function ProjectDetailPage() {
     const [featuredCursor, setFeaturedCursor] = useState<string | null>(null);
     const [loadingMoreFeatured, setLoadingMoreFeatured] = useState(false);
     const [loadingMore, setLoadingMore] = useState(false);
-    const [showEditModal, setShowEditModal] = useState(false);
-    const [editForm, setEditForm] = useState({
+
+    // Cost settings loaded from global_settings
+    const [costSettings, setCostSettings] = useState<ModelCostSetting[]>(DEFAULT_MODEL_COSTS);
+
+    // Overview right-rail Booth Setup quick-edit state
+    const [boothLimit, setBoothLimit] = useState(1000);
+    const [boothModel, setBoothModel] = useState(DEFAULT_OPERATOR_SETTINGS.openaiModel);
+    const [boothRefs, setBoothRefs] = useState(1);
+    const [boothSaving, setBoothSaving] = useState(false);
+    const [boothSaved, setBoothSaved] = useState(false);
+
+    // Project Settings Tab State
+    const [settingsForm, setSettingsForm] = useState<{
+        name: string;
+        description: string;
+        dailyLimit: number;
+        referenceImagesCount: number;
+        projectType: ProjectPlatformType;
+        cloudinaryCloudName: string;
+        cloudinaryApiKey: string;
+        cloudinaryApiSecret: string;
+        cloudinaryFolder: string;
+        aiModelsList: string[];
+        selectedAiModel: string;
+        enablePrinting: boolean;
+        totalPrintedCopies: number;
+        operatorSettings: Required<ProjectOperatorSettings>;
+    }>({
         name: '',
         description: '',
-        dailyLimit: 0,
-        cloudinaryTag: ''
+        dailyLimit: 1000,
+        referenceImagesCount: 1,
+        projectType: 'desktop',
+        cloudinaryCloudName: '',
+        cloudinaryApiKey: '',
+        cloudinaryApiSecret: '',
+        cloudinaryFolder: '',
+        aiModelsList: [...DEFAULT_AI_MODELS],
+        selectedAiModel: DEFAULT_OPERATOR_SETTINGS.openaiModel,
+        enablePrinting: true,
+        totalPrintedCopies: 0,
+        operatorSettings: { ...DEFAULT_OPERATOR_SETTINGS },
     });
+
+    const [newAiModelInput, setNewAiModelInput] = useState('');
+    const [newPrinterInput, setNewPrinterInput] = useState('');
+    const [newEraKeyInput, setNewEraKeyInput] = useState('');
+    const [isSavingSettings, setIsSavingSettings] = useState(false);
+    const [settingsSaveSuccess, setSettingsSaveSuccess] = useState(false);
+    const [settingsError, setSettingsError] = useState('');
+    const [showSecrets, setShowSecrets] = useState<{
+        cloudinarySecret: boolean;
+        openaiKey: boolean;
+        geminiKey: boolean;
+        operatorPassword: boolean;
+    }>({
+        cloudinarySecret: false,
+        openaiKey: false,
+        geminiKey: false,
+        operatorPassword: false,
+    });
+    const jsonImportInputRef = React.useRef<HTMLInputElement | null>(null);
+
+    // Gallery & Featured state
     const [taggingId, setTaggingId] = useState<string | null>(null);
-    const [isDeleting, setIsDeleting] = useState(false);
     const [selectedIds, setSelectedIds] = useState<string[]>([]);
     const [isSelectionMode, setIsSelectionMode] = useState(false);
     const [sortOrder, setSortOrder] = useState<'desc' | 'asc'>('desc');
+    const [dayFilter, setDayFilter] = useState<string>('all');
     const [inspectImage, setInspectImage] = useState<CloudinaryImage | null>(null);
+    const [lightboxImage, setLightboxImage] = useState<CloudinaryImage | null>(null);
+    const [qrModalImage, setQrModalImage] = useState<CloudinaryImage | null>(null);
+    const [deleteImageTargets, setDeleteImageTargets] = useState<CloudinaryImage[]>([]);
+    const [isDeletingImages, setIsDeletingImages] = useState(false);
+    const [toastState, setToastState] = useState<{
+        message: string;
+        img?: CloudinaryImage;
+    } | null>(null);
+
+    // 2-step Delete Project confirmation dialog
+    const [deleteStep, setDeleteStep] = useState<0 | 1 | 2>(0);
+    const [deleteConfirmText, setDeleteConfirmText] = useState('');
+    const [isDeleting, setIsDeleting] = useState(false);
+
     const [mounted, setMounted] = useState(false);
-
-    useEffect(() => {
-        setMounted(true);
-    }, []);
-
     const [isLoading, setIsLoading] = useState(true);
     const [members, setMembers] = useState<any[]>([]);
     const [allProfiles, setAllProfiles] = useState<any[]>([]);
-    const [searchQuery, setSearchQuery] = useState('');
-    const [timeRange, setTimeRange] = useState<number | 'custom'>(7);
+    const [selectedUserIdToAdd, setSelectedUserIdToAdd] = useState('');
+
+    // Bar chart range state
+    const [chartRange, setChartRange] = useState<ChartRange>('event');
     const [customRange, setCustomRange] = useState({
-        start: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-        end: new Date().toISOString().split('T')[0]
+        start: new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+        end: new Date().toISOString().split('T')[0],
     });
 
     useEffect(() => {
+        setMounted(true);
         setOrigin(window.location.origin);
     }, []);
 
     useEffect(() => {
+        const tabParam = searchParams?.get('tab');
+        if (tabParam === 'gallery' || tabParam === 'images') setActiveTab('gallery');
+        else if (tabParam === 'featured') setActiveTab('featured');
+        else if (tabParam === 'settings') setActiveTab('settings');
+        else if (tabParam === 'overview') setActiveTab('overview');
+    }, [searchParams]);
+
+    useEffect(() => {
         if (!user || !id) return;
         fetchProjectData();
-    }, [id, user, timeRange, customRange.start, customRange.end, sortOrder]);
+    }, [id, user, sortOrder]);
+
+    const switchTab = (tab: ProjectTab) => {
+        setActiveTab(tab);
+        setSelectedIds([]);
+        setIsSelectionMode(false);
+    };
 
     const fetchProjectData = async () => {
         setIsLoading(true);
@@ -110,24 +237,70 @@ export default function ProjectDetailPage() {
                 return;
             }
 
-            // Fallback for Cloudinary settings
-            let finalCloudName = p.cloudinary_cloud_name;
-            let finalApiKey = p.cloudinary_api_key;
-            let finalApiSecret = p.cloudinary_api_secret;
+            const { data: globalSettings } = await supabase
+                .from('global_settings')
+                .select('*')
+                .eq('id', 'current')
+                .single();
 
-            if (!finalCloudName) {
-                const { data: globalSettings } = await supabase
-                    .from('global_settings')
-                    .select('*')
-                    .eq('id', 'current')
-                    .single();
-
-                if (globalSettings) {
-                    finalCloudName = globalSettings.cloudinary_cloud_name;
-                    finalApiKey = globalSettings.cloudinary_api_key;
-                    finalApiSecret = globalSettings.cloudinary_api_secret;
-                }
+            if (globalSettings && Array.isArray(globalSettings.cost_settings) && globalSettings.cost_settings.length > 0) {
+                setCostSettings(globalSettings.cost_settings);
             }
+
+            const op: ProjectOperatorSettings = p.operator_settings || {};
+            const rawProjectCloudName = p.cloudinary_cloud_name || op.cloudinaryCloudName || '';
+            const rawProjectApiKey = p.cloudinary_api_key || op.cloudinaryApiKey || '';
+            const rawProjectApiSecret = p.cloudinary_api_secret || op.cloudinaryApiSecret || '';
+            const finalCloudName = rawProjectCloudName || globalSettings?.cloudinary_cloud_name || '';
+            const finalApiKey = rawProjectApiKey || globalSettings?.cloudinary_api_key || '';
+            const finalApiSecret = rawProjectApiSecret || globalSettings?.cloudinary_api_secret || '';
+            const finalFolder = p.cloudinary_folder || p.cloudinary_tag || op.cloudinaryFolder || '';
+
+            const resolvedModelsList: string[] =
+                Array.isArray(p.ai_models_list) && p.ai_models_list.length > 0
+                    ? p.ai_models_list
+                    : Array.isArray(op.aiModelsList) && op.aiModelsList.length > 0
+                        ? op.aiModelsList
+                        : [...DEFAULT_AI_MODELS];
+
+            const resolvedSelectedModel =
+                p.selected_ai_model ||
+                op.openaiModel ||
+                resolvedModelsList[0] ||
+                DEFAULT_OPERATOR_SETTINGS.openaiModel;
+
+            const resolvedEnablePrinting =
+                typeof p.enable_printing === 'boolean'
+                    ? p.enable_printing
+                    : typeof op.enablePrinting === 'boolean'
+                        ? op.enablePrinting
+                        : true;
+
+            const resolvedProjectType: ProjectPlatformType =
+                p.project_type === 'web' || p.project_type === 'desktop'
+                    ? p.project_type
+                    : 'desktop';
+
+            const resolvedTotalPrintedCopies = p.total_printed_copies || 0;
+            const resolvedRefs = typeof p.reference_images_count === 'number' ? p.reference_images_count : 1;
+
+            const mergedOp: Required<ProjectOperatorSettings> = {
+                ...DEFAULT_OPERATOR_SETTINGS,
+                ...op,
+                cloudinaryCloudName: rawProjectCloudName || finalCloudName,
+                cloudinaryApiKey: rawProjectApiKey || finalApiKey,
+                cloudinaryApiSecret: rawProjectApiSecret || finalApiSecret,
+                cloudinaryFolder: finalFolder,
+                dashboardProjectId: p.id,
+                openaiModel: resolvedSelectedModel,
+                aiModelsList: resolvedModelsList,
+                enablePrinting: resolvedEnablePrinting,
+                printerNames: Array.isArray(op.printerNames) ? op.printerNames : [],
+                customEraPrompts: {
+                    ...DEFAULT_OPERATOR_SETTINGS.customEraPrompts,
+                    ...(op.customEraPrompts || {}),
+                },
+            };
 
             const mapped: Project = {
                 id: p.id,
@@ -137,48 +310,59 @@ export default function ProjectDetailPage() {
                 currentGenerations: p.total_usage || 0,
                 createdAt: p.created_at,
                 ownerId: p.created_by || '',
-                status: p.is_active ? ((p.total_usage || 0) >= (p.max_usage || 0) ? 'exhausted' : 'active') : 'paused',
+                is_active: p.is_active !== false,
+                status: p.is_active === false ? 'paused' : 'active',
+                projectType: resolvedProjectType,
+                aiModelsList: resolvedModelsList,
+                selectedAiModel: resolvedSelectedModel,
+                enablePrinting: resolvedEnablePrinting,
+                totalPrintedCopies: resolvedTotalPrintedCopies,
+                referenceImagesCount: resolvedRefs,
                 cloudinaryCloudName: finalCloudName,
-                cloudinaryTag: p.cloudinary_tag,
+                cloudinaryTag: finalFolder,
+                cloudinaryFolder: finalFolder,
                 cloudinaryApiKey: finalApiKey,
-                cloudinaryApiSecret: finalApiSecret
+                cloudinaryApiSecret: finalApiSecret,
+                operatorSettings: mergedOp,
             };
 
             setProject(mapped);
-            setEditForm({
+            setBoothLimit(mapped.dailyLimit);
+            setBoothModel(resolvedSelectedModel);
+            setBoothRefs(resolvedRefs);
+
+            setSettingsForm({
                 name: mapped.name,
                 description: mapped.description,
                 dailyLimit: mapped.dailyLimit,
-                cloudinaryTag: mapped.cloudinaryTag || ''
+                referenceImagesCount: resolvedRefs,
+                projectType: resolvedProjectType,
+                cloudinaryCloudName: rawProjectCloudName || finalCloudName,
+                cloudinaryApiKey: rawProjectApiKey || finalApiKey,
+                cloudinaryApiSecret: rawProjectApiSecret || finalApiSecret,
+                cloudinaryFolder: finalFolder,
+                aiModelsList: resolvedModelsList,
+                selectedAiModel: resolvedSelectedModel,
+                enablePrinting: resolvedEnablePrinting,
+                totalPrintedCopies: resolvedTotalPrintedCopies,
+                operatorSettings: mergedOp,
             });
 
-            // Fetch Logs based on timeRange
-            let beginDate: Date;
-            let finalDate: Date = new Date();
-
-            if (timeRange === 'custom') {
-                beginDate = new Date(customRange.start);
-                finalDate = new Date(customRange.end);
-                finalDate.setHours(23, 59, 59, 999);
-            } else {
-                beginDate = new Date();
-                beginDate.setDate(beginDate.getDate() - timeRange);
-            }
-
+            // Fetch all usage logs for this project
             const { data: logsData } = await supabase
                 .from('usage_logs')
                 .select('*')
                 .eq('project_id', id)
-                .gte('timestamp', beginDate.toISOString())
-                .lte('timestamp', finalDate.toISOString())
                 .order('timestamp', { ascending: false });
 
-            setLogs((logsData || []).map(l => ({
-                id: l.id,
-                projectId: l.project_id,
-                timestamp: l.timestamp,
-                amount: l.amount
-            })));
+            setLogs(
+                (logsData || []).map((l: any) => ({
+                    id: l.id,
+                    projectId: l.project_id,
+                    timestamp: l.timestamp,
+                    amount: l.amount || 1,
+                }))
+            );
 
             if (mapped.cloudinaryTag) {
                 fetchImages(mapped.cloudinaryTag, mapped, false);
@@ -186,25 +370,24 @@ export default function ProjectDetailPage() {
             }
 
             // Fetch Members
-            const { data: memberData, error: mError } = await supabase
+            const { data: memberData } = await supabase
                 .from('project_members')
                 .select('id, profiles(id, full_name, email, avatar_url, role)')
                 .eq('project_id', id);
 
+            setMembers(
+                (memberData || []).map((m: any) => ({
+                    memberId: m.id,
+                    ...(Array.isArray(m.profiles) ? m.profiles[0] : m.profiles || {}),
+                }))
+            );
 
-            setMembers((memberData || []).map((m: any) => ({
-                memberId: m.id,
-                ...(Array.isArray(m.profiles) ? m.profiles[0] : m.profiles || {})
-            })));
-
-            // Fetch All Profiles (for adding)
             if (user?.role === UserRole.ADMIN) {
-                const { data: profileData, error: pError } = await supabase
+                const { data: profileData } = await supabase
                     .from('profiles')
                     .select('id, full_name, email, avatar_url, role');
                 setAllProfiles(profileData || []);
             }
-
         } catch (err) {
             console.error('Error fetching project:', err);
             router.push('/projects');
@@ -214,12 +397,13 @@ export default function ProjectDetailPage() {
     };
 
     const handleAddMember = async (userId: string) => {
+        if (!userId) return;
         try {
             const { error } = await supabase
                 .from('project_members')
                 .insert([{ project_id: id, user_id: userId }]);
-
             if (error) throw error;
+            setSelectedUserIdToAdd('');
             fetchProjectData();
         } catch (err) {
             console.error('Error adding member:', err);
@@ -233,7 +417,6 @@ export default function ProjectDetailPage() {
                 .from('project_members')
                 .delete()
                 .eq('id', memberId);
-
             if (error) throw error;
             fetchProjectData();
         } catch (err) {
@@ -243,22 +426,13 @@ export default function ProjectDetailPage() {
 
     const handleDeleteProject = async () => {
         if (!project) return;
-
-        const confirmed = window.confirm(
-            `Are you sure you want to permanently delete "${project.name}"?\nThis action cannot be undone.`
-        );
-
-        if (!confirmed) return;
-
         setIsDeleting(true);
         try {
             const { error } = await supabase
                 .from('projects')
                 .delete()
                 .eq('id', project.id);
-
             if (error) throw error;
-
             router.push('/projects');
         } catch (err) {
             console.error('Delete error:', err);
@@ -267,32 +441,54 @@ export default function ProjectDetailPage() {
         }
     };
 
-    const handleUpdateProject = async (e: React.FormEvent) => {
-        e.preventDefault();
+    const handleToggleProjectActive = async () => {
         if (!project) return;
-
+        const currentlyActive = project.status !== 'paused';
         try {
-            const { error } = await supabase
-                .from('projects')
-                .update({
-                    name: editForm.name,
-                    description: editForm.description,
-                    max_usage: editForm.dailyLimit,
-                    cloudinary_tag: editForm.cloudinaryTag
-                })
-                .eq('id', project.id);
-
-            if (error) throw error;
-
+            const res = await fetch(`/api/projects/${project.id}/settings`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ isActive: !currentlyActive }),
+            });
+            if (!res.ok) throw new Error('Failed to update project status');
             await fetchProjectData();
-            setShowEditModal(false);
         } catch (err) {
-            console.error('Update error:', err);
-            alert('Failed to update project');
+            console.error(err);
+            alert('Failed to update project status.');
         }
     };
 
-    const handleToggleTag = async (img: CloudinaryImage) => {
+    const handleSaveBoothSetup = async () => {
+        if (!project) return;
+        setBoothSaving(true);
+        try {
+            const nextList = settingsForm.aiModelsList.includes(boothModel)
+                ? settingsForm.aiModelsList
+                : [boothModel, ...settingsForm.aiModelsList];
+
+            const res = await fetch(`/api/projects/${project.id}/settings`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    dailyLimit: boothLimit,
+                    selectedAiModel: boothModel,
+                    aiModelsList: nextList,
+                    referenceImagesCount: boothRefs,
+                }),
+            });
+            if (!res.ok) throw new Error('Failed to save booth setup');
+            setBoothSaved(true);
+            setTimeout(() => setBoothSaved(false), 2400);
+            await fetchProjectData();
+        } catch (err) {
+            console.error('Error saving booth setup:', err);
+            alert('Failed to save booth setup.');
+        } finally {
+            setBoothSaving(false);
+        }
+    };
+
+    const handleToggleTag = async (img: CloudinaryImage, showUndoToast = true) => {
         if (!project || taggingId) return;
 
         const isFeatured = img.tags?.includes('Featured');
@@ -305,43 +501,55 @@ export default function ProjectDetailPage() {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
+                    projectId: project.id,
                     public_id: img.public_id,
                     tag,
                     action,
                     cloudName: project.cloudinaryCloudName,
                     apiKey: project.cloudinaryApiKey,
-                    apiSecret: project.cloudinaryApiSecret
-                })
+                    apiSecret: project.cloudinaryApiSecret,
+                }),
             });
 
             if (response.ok) {
-                // Update local state for 'images'
-                setImages(prev => prev.map(i => {
-                    if (i.public_id === img.public_id) {
-                        const newTags = isFeatured
-                            ? (i.tags || []).filter(t => t !== tag)
-                            : [...(i.tags || []), tag];
-                        return { ...i, tags: newTags };
-                    }
-                    return i;
-                }));
+                const updatedTags = isFeatured
+                    ? (img.tags || []).filter(t => t !== tag)
+                    : [...(img.tags || []), tag];
+                const updatedImg: CloudinaryImage = { ...img, tags: updatedTags };
 
-                // Update featuredImages if needed
+                setImages(prev =>
+                    prev.map(i => (i.public_id === img.public_id ? updatedImg : i))
+                );
+                if (inspectImage?.public_id === img.public_id) {
+                    setInspectImage(updatedImg);
+                }
+                if (lightboxImage?.public_id === img.public_id) {
+                    setLightboxImage(updatedImg);
+                }
+
                 if (isFeatured) {
                     setFeaturedImages(prev => {
                         const remaining = prev.filter(i => i.public_id !== img.public_id);
-                        // If we just emptied the list but there's more on the server, auto-fetch
                         if (remaining.length === 0 && featuredCursor) {
                             fetchFeaturedImages(undefined, true);
                         }
                         return remaining;
                     });
                 } else {
-                    const updatedImg = { ...img, tags: [...(img.tags || []), tag] };
                     setFeaturedImages(prev => {
                         if (prev.some(i => i.public_id === img.public_id)) return prev;
                         return [updatedImg, ...prev];
                     });
+                }
+
+                if (showUndoToast) {
+                    setToastState({
+                        message: isFeatured ? 'Removed from Featured' : 'Added to Featured',
+                        img: updatedImg,
+                    });
+                    setTimeout(() => {
+                        setToastState(prev => (prev?.img?.public_id === img.public_id ? null : prev));
+                    }, 4000);
                 }
             } else {
                 const errorData = await response.json();
@@ -365,8 +573,7 @@ export default function ProjectDetailPage() {
         else setLoadingImages(true);
 
         try {
-            // Simplified URL: The server-side API now fetches secrets from Supabase global_settings
-            let url = `/api/cloudinary/images?tag=${encodeURIComponent(activeTag)}&sort=${sortOrder}`;
+            let url = `/api/cloudinary/images?projectId=${encodeURIComponent(p.id)}&tag=${encodeURIComponent(activeTag)}&sort=${sortOrder}`;
             if (p.cloudinaryCloudName) {
                 url += `&cloudName=${encodeURIComponent(p.cloudinaryCloudName)}`;
             }
@@ -405,13 +612,11 @@ export default function ProjectDetailPage() {
         const projectTag = p.cloudinaryTag || '';
         if (!projectTag) return;
 
-        const activeTag = 'Featured';
-
         if (append) setLoadingMoreFeatured(true);
         else setLoadingFeatured(true);
 
         try {
-            let url = `/api/cloudinary/images?tag=${encodeURIComponent(projectTag)}&subtag=${encodeURIComponent(activeTag)}&sort=${sortOrder}`;
+            let url = `/api/cloudinary/images?projectId=${encodeURIComponent(p.id)}&tag=${encodeURIComponent(projectTag)}&subtag=Featured&sort=${sortOrder}`;
             if (p.cloudinaryCloudName) {
                 url += `&cloudName=${encodeURIComponent(p.cloudinaryCloudName)}`;
             }
@@ -446,73 +651,25 @@ export default function ProjectDetailPage() {
     const handleSimulateApiCall = async () => {
         if (!project || isSimulating) return;
         setIsSimulating(true);
-
         try {
             const amount = 1;
-
-            // 1. Create a log entry
             const { error: logError } = await supabase
                 .from('usage_logs')
                 .insert([{ project_id: project.id, amount }]);
-
             if (logError) throw logError;
 
-            // 2. Increment project total_usage
             const { error: updateError } = await supabase.rpc('increment_project_usage', {
                 p_id: project.id,
-                p_amount: amount
+                p_amount: amount,
             });
-
             if (updateError) throw updateError;
-
-            // Refresh UI
             await fetchProjectData();
-
         } catch (err) {
             console.error('Simulation error:', err);
-            alert('Simulation failed. Did you create the increment_project_usage function?');
+            alert('Simulation failed.');
         } finally {
             setIsSimulating(false);
         }
-    };
-
-    const handleBulkDownload = async () => {
-        if (selectedIds.length === 0) return;
-
-        const currentImages = activeTab === 'featured' ? featuredImages : images;
-        const selectedImages = currentImages.filter(img => selectedIds.includes(img.public_id));
-
-        for (const img of selectedImages) {
-            const dateStr = new Date(img.created_at).toLocaleString(undefined, {
-                month: 'short',
-                day: 'numeric',
-                hour: '2-digit',
-                minute: '2-digit'
-            }).replace(/[,:]/g, '').replace(/\s+/g, '_');
-            const fileName = `${project?.name}_${dateStr}.${img.format}`;
-            const url = `https://res.cloudinary.com/${project?.cloudinaryCloudName || 'placeholder'}/image/upload/v${img.version}/${img.public_id}.${img.format}`;
-
-            await handleDownload(url, fileName);
-            // Small delay to prevent browser blocking multiple downloads
-            await new Promise(resolve => setTimeout(resolve, 300));
-        }
-    };
-
-    const toggleSelectAll = () => {
-        const currentImages = activeTab === 'featured' ? featuredImages : images;
-        if (selectedIds.length === currentImages.length) {
-            setSelectedIds([]);
-        } else {
-            setSelectedIds(currentImages.map(img => img.public_id));
-        }
-    };
-
-    const toggleImageSelection = (publicId: string) => {
-        setSelectedIds(prev =>
-            prev.includes(publicId)
-                ? prev.filter(id => id !== publicId)
-                : [...prev, publicId]
-        );
     };
 
     const handleDownload = async (url: string, filename: string) => {
@@ -529,9 +686,114 @@ export default function ProjectDetailPage() {
             window.URL.revokeObjectURL(blobUrl);
         } catch (error) {
             console.error('Download failed:', error);
-            // Fallback: open in new tab with attachment flag if possible
             window.open(url + (url.includes('?') ? '&' : '?') + 'fl_attachment', '_blank');
         }
+    };
+
+    const getFullImageUrl = (img: CloudinaryImage) =>
+        `https://res.cloudinary.com/${project?.cloudinaryCloudName || 'placeholder'}/image/upload/v${img.version}/${img.public_id}.${img.format}`;
+
+    const getThumbImageUrl = (img: CloudinaryImage) =>
+        `https://res.cloudinary.com/${project?.cloudinaryCloudName || 'placeholder'}/image/upload/w_500,c_fill,g_auto/v${img.version}/${img.public_id}.${img.format}`;
+
+    const handleDownloadSingleImage = (img: CloudinaryImage) => {
+        const dateStr = new Date(img.created_at)
+            .toLocaleString(undefined, {
+                month: 'short',
+                day: 'numeric',
+                hour: '2-digit',
+                minute: '2-digit',
+            })
+            .replace(/[,:]/g, '')
+            .replace(/\s+/g, '_');
+        const fileName = `${project?.name || 'portrait'}_${dateStr}.${img.format}`;
+        handleDownload(getFullImageUrl(img), fileName);
+    };
+
+    const handleBulkDownload = async (targetImages?: CloudinaryImage[]) => {
+        const list =
+            targetImages ||
+            (activeTab === 'featured' ? featuredImages : filteredGalleryImages).filter(img =>
+                selectedIds.includes(img.public_id)
+            );
+        if (list.length === 0) return;
+
+        for (const img of list) {
+            handleDownloadSingleImage(img);
+            await new Promise(resolve => setTimeout(resolve, 300));
+        }
+    };
+
+    const handleConfirmDeleteImages = async () => {
+        if (!project || deleteImageTargets.length === 0 || isDeletingImages) return;
+        setIsDeletingImages(true);
+        const idsToDelete = deleteImageTargets.map(i => i.public_id);
+
+        try {
+            const response = await fetch('/api/cloudinary/images', {
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    projectId: project.id,
+                    public_ids: idsToDelete,
+                    cloudName: project.cloudinaryCloudName,
+                    apiKey: project.cloudinaryApiKey,
+                    apiSecret: project.cloudinaryApiSecret,
+                }),
+            });
+
+            if (!response.ok) {
+                const errData = await response.json().catch(() => ({}));
+                throw new Error(errData.error || 'Failed to delete portrait from Cloudinary');
+            }
+
+            const deletedSet = new Set(idsToDelete);
+            setImages(prev => prev.filter(i => !deletedSet.has(i.public_id)));
+            setFeaturedImages(prev => prev.filter(i => !deletedSet.has(i.public_id)));
+            setSelectedIds(prev => prev.filter(idItem => !deletedSet.has(idItem)));
+
+            if (inspectImage && deletedSet.has(inspectImage.public_id)) {
+                setInspectImage(null);
+            }
+            if (lightboxImage && deletedSet.has(lightboxImage.public_id)) {
+                setLightboxImage(null);
+            }
+            if (qrModalImage && deletedSet.has(qrModalImage.public_id)) {
+                setQrModalImage(null);
+            }
+
+            setDeleteImageTargets([]);
+            const deletedCount = idsToDelete.length;
+            setToastState({
+                message:
+                    deletedCount === 1
+                        ? 'Portrait deleted from Cloudinary'
+                        : `${deletedCount} portraits deleted from Cloudinary`,
+            });
+            setTimeout(() => {
+                setToastState(prev => (prev && !prev.img ? null : prev));
+            }, 3500);
+        } catch (err: any) {
+            console.error('Error deleting portrait(s):', err);
+            alert(err?.message || 'Failed to delete portrait from Cloudinary.');
+        } finally {
+            setIsDeletingImages(false);
+        }
+    };
+
+    const toggleSelectAll = () => {
+        const currentImages = activeTab === 'featured' ? featuredImages : filteredGalleryImages;
+        if (selectedIds.length === currentImages.length) {
+            setSelectedIds([]);
+        } else {
+            setSelectedIds(currentImages.map(img => img.public_id));
+        }
+    };
+
+    const toggleImageSelection = (publicId: string) => {
+        setSelectedIds(prev =>
+            prev.includes(publicId) ? prev.filter(item => item !== publicId) : [...prev, publicId]
+        );
     };
 
     const copyToClipboard = (text: string) => {
@@ -540,59 +802,482 @@ export default function ProjectDetailPage() {
         setTimeout(() => setCopied(false), 2000);
     };
 
-    const chartData = useMemo(() => {
-        const lastDays = [];
+    const copyProjectId = (text: string) => {
+        navigator.clipboard.writeText(text);
+        setCopiedId(true);
+        setTimeout(() => setCopiedId(false), 2000);
+    };
 
-        let start: Date;
-        let end: Date = new Date();
-        let daysCount: number;
+    const copySyncUrlToClipboard = (text: string) => {
+        navigator.clipboard.writeText(text);
+        setCopiedSyncUrl(true);
+        setTimeout(() => setCopiedSyncUrl(false), 2000);
+    };
 
-        if (timeRange === 'custom') {
-            start = new Date(customRange.start);
-            end = new Date(customRange.end);
-            daysCount = Math.max(1, Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)) + 1);
-        } else {
-            daysCount = timeRange as number;
-            start = new Date();
-            start.setDate(start.getDate() - (daysCount - 1));
+    const copyPrintUrlToClipboard = (text: string) => {
+        navigator.clipboard.writeText(text);
+        setCopiedPrintUrl(true);
+        setTimeout(() => setCopiedPrintUrl(false), 2000);
+    };
+
+    const updateOpField = <K extends keyof Required<ProjectOperatorSettings>>(
+        key: K,
+        value: Required<ProjectOperatorSettings>[K]
+    ) => {
+        setSettingsForm(prev => ({
+            ...prev,
+            operatorSettings: {
+                ...prev.operatorSettings,
+                [key]: value,
+            },
+        }));
+    };
+
+    const handleAddAiModel = () => {
+        const trimmed = newAiModelInput.trim();
+        if (!trimmed) return;
+        if (settingsForm.aiModelsList.includes(trimmed)) {
+            setNewAiModelInput('');
+            return;
         }
+        const nextList = [...settingsForm.aiModelsList, trimmed];
+        setSettingsForm(prev => ({
+            ...prev,
+            aiModelsList: nextList,
+            selectedAiModel: prev.selectedAiModel || trimmed,
+            operatorSettings: {
+                ...prev.operatorSettings,
+                aiModelsList: nextList,
+            },
+        }));
+        setNewAiModelInput('');
+    };
 
-        for (let i = 0; i < daysCount; i++) {
-            const d = new Date(start);
-            d.setDate(d.getDate() + i);
-            const dateStr = d.toISOString().split('T')[0];
+    const handleRemoveAiModel = (modelName: string) => {
+        if (settingsForm.aiModelsList.length <= 1) {
+            alert('At least one AI model must remain in the list.');
+            return;
+        }
+        const nextList = settingsForm.aiModelsList.filter(m => m !== modelName);
+        const nextSelected =
+            settingsForm.selectedAiModel === modelName ? nextList[0] : settingsForm.selectedAiModel;
+        setSettingsForm(prev => ({
+            ...prev,
+            aiModelsList: nextList,
+            selectedAiModel: nextSelected,
+            operatorSettings: {
+                ...prev.operatorSettings,
+                aiModelsList: nextList,
+                openaiModel: nextSelected,
+            },
+        }));
+    };
 
-            let label = d.toLocaleDateString(undefined, { weekday: 'short' });
-            if (daysCount > 14) {
-                label = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    const handleAddPrinterName = () => {
+        const trimmed = newPrinterInput.trim();
+        if (!trimmed) return;
+        const currentPrinters = settingsForm.operatorSettings.printerNames || [];
+        if (currentPrinters.includes(trimmed)) {
+            setNewPrinterInput('');
+            return;
+        }
+        const nextPrinters = [...currentPrinters, trimmed];
+        setSettingsForm(prev => ({
+            ...prev,
+            operatorSettings: {
+                ...prev.operatorSettings,
+                printerNames: nextPrinters,
+                selectedPrinterName: prev.operatorSettings.selectedPrinterName || trimmed,
+            },
+        }));
+        setNewPrinterInput('');
+    };
+
+    const handleRemovePrinterName = (printerName: string) => {
+        const currentPrinters = settingsForm.operatorSettings.printerNames || [];
+        const nextPrinters = currentPrinters.filter(p => p !== printerName);
+        setSettingsForm(prev => ({
+            ...prev,
+            operatorSettings: {
+                ...prev.operatorSettings,
+                printerNames: nextPrinters,
+                selectedPrinterName:
+                    prev.operatorSettings.selectedPrinterName === printerName
+                        ? nextPrinters[0] || ''
+                        : prev.operatorSettings.selectedPrinterName,
+            },
+        }));
+    };
+
+    const handleAddCustomEraPromptKey = () => {
+        const key = newEraKeyInput.trim().toLowerCase().replace(/\s+/g, '_');
+        if (!key) return;
+        setSettingsForm(prev => ({
+            ...prev,
+            operatorSettings: {
+                ...prev.operatorSettings,
+                customEraPrompts: {
+                    ...prev.operatorSettings.customEraPrompts,
+                    [key]: prev.operatorSettings.customEraPrompts[key] || '',
+                },
+            },
+        }));
+        setNewEraKeyInput('');
+    };
+
+    const handleRemoveCustomEraPromptKey = (key: string) => {
+        setSettingsForm(prev => {
+            const nextPrompts = { ...prev.operatorSettings.customEraPrompts };
+            delete nextPrompts[key];
+            return {
+                ...prev,
+                operatorSettings: {
+                    ...prev.operatorSettings,
+                    customEraPrompts: nextPrompts,
+                },
+            };
+        });
+    };
+
+    const handleSaveProjectSettings = async (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!project) return;
+
+        setIsSavingSettings(true);
+        setSettingsSaveSuccess(false);
+        setSettingsError('');
+
+        try {
+            const fullOperatorPayload: ProjectOperatorSettings = {
+                ...settingsForm.operatorSettings,
+                cloudinaryCloudName: settingsForm.cloudinaryCloudName.trim(),
+                cloudinaryApiKey: settingsForm.cloudinaryApiKey.trim(),
+                cloudinaryApiSecret: settingsForm.cloudinaryApiSecret.trim(),
+                cloudinaryFolder: settingsForm.cloudinaryFolder.trim(),
+                dashboardProjectId: project.id,
+                openaiModel: settingsForm.selectedAiModel,
+                aiModelsList: settingsForm.aiModelsList,
+                enablePrinting: settingsForm.enablePrinting,
+            };
+
+            const response = await fetch(`/api/projects/${project.id}/settings`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    name: settingsForm.name.trim(),
+                    description: settingsForm.description,
+                    dailyLimit: settingsForm.dailyLimit,
+                    referenceImagesCount: settingsForm.referenceImagesCount,
+                    projectType: settingsForm.projectType,
+                    cloudinaryCloudName: settingsForm.cloudinaryCloudName.trim(),
+                    cloudinaryApiKey: settingsForm.cloudinaryApiKey.trim(),
+                    cloudinaryApiSecret: settingsForm.cloudinaryApiSecret.trim(),
+                    cloudinaryFolder: settingsForm.cloudinaryFolder.trim(),
+                    aiModelsList: settingsForm.aiModelsList,
+                    selectedAiModel: settingsForm.selectedAiModel,
+                    enablePrinting: settingsForm.enablePrinting,
+                    totalPrintedCopies: settingsForm.totalPrintedCopies,
+                    operatorSettings: fullOperatorPayload,
+                }),
+            });
+
+            if (!response.ok) {
+                const errData = await response.json();
+                throw new Error(errData.error || 'Failed to save project settings');
             }
 
-            lastDays.push({
-                name: label,
-                dateStr: dateStr,
-                count: 0
+            setSettingsSaveSuccess(true);
+            setTimeout(() => setSettingsSaveSuccess(false), 3000);
+            await fetchProjectData();
+        } catch (err: any) {
+            console.error('Error saving project settings:', err);
+            setSettingsError(err.message || 'Failed to save settings.');
+        } finally {
+            setIsSavingSettings(false);
+        }
+    };
+
+    const handleSimulatePrintIncrement = async () => {
+        if (!project || isSimulatingPrint) return;
+        setIsSimulatingPrint(true);
+        try {
+            const res = await fetch(`/api/projects/${project.id}/print`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ copies: 1 }),
+            });
+            if (!res.ok) throw new Error('Print increment request failed');
+            await fetchProjectData();
+        } catch (err) {
+            console.error('Simulate print error:', err);
+            alert('Failed to simulate print increment.');
+        } finally {
+            setIsSimulatingPrint(false);
+        }
+    };
+
+    const handleExportOperatorJson = () => {
+        if (!project) return;
+        const payload = {
+            ...settingsForm.operatorSettings,
+            cloudinaryCloudName: settingsForm.cloudinaryCloudName.trim(),
+            cloudinaryApiKey: settingsForm.cloudinaryApiKey.trim(),
+            cloudinaryApiSecret: settingsForm.cloudinaryApiSecret.trim(),
+            cloudinaryFolder: settingsForm.cloudinaryFolder.trim(),
+            dashboardProjectId: project.id,
+            openaiModel: settingsForm.selectedAiModel,
+            aiModelsList: settingsForm.aiModelsList,
+            enablePrinting: settingsForm.enablePrinting,
+        };
+        const jsonString = JSON.stringify(payload, null, 2);
+        const blob = new Blob([jsonString], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'operator-settings.json';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    };
+
+    const handleImportOperatorJson = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (!file || !project) return;
+
+        try {
+            const text = await file.text();
+            const parsed = JSON.parse(text);
+
+            const importedModels =
+                Array.isArray(parsed.aiModelsList) && parsed.aiModelsList.length > 0
+                    ? parsed.aiModelsList
+                    : settingsForm.aiModelsList;
+            const importedSelectedModel = parsed.openaiModel || settingsForm.selectedAiModel;
+            const mergedModels = importedModels.includes(importedSelectedModel)
+                ? importedModels
+                : [importedSelectedModel, ...importedModels];
+
+            setSettingsForm(prev => ({
+                ...prev,
+                cloudinaryCloudName: parsed.cloudinaryCloudName ?? prev.cloudinaryCloudName,
+                cloudinaryApiKey: parsed.cloudinaryApiKey ?? prev.cloudinaryApiKey,
+                cloudinaryApiSecret: parsed.cloudinaryApiSecret ?? prev.cloudinaryApiSecret,
+                cloudinaryFolder: parsed.cloudinaryFolder ?? prev.cloudinaryFolder,
+                aiModelsList: mergedModels,
+                selectedAiModel: importedSelectedModel,
+                enablePrinting:
+                    typeof parsed.enablePrinting === 'boolean' ? parsed.enablePrinting : prev.enablePrinting,
+                operatorSettings: {
+                    ...prev.operatorSettings,
+                    ...parsed,
+                    dashboardProjectId: project.id,
+                    printerNames: Array.isArray(parsed.printerNames)
+                        ? parsed.printerNames
+                        : prev.operatorSettings.printerNames,
+                    customEraPrompts: {
+                        ...prev.operatorSettings.customEraPrompts,
+                        ...(parsed.customEraPrompts || {}),
+                    },
+                },
+            }));
+        } catch (err: any) {
+            alert(`Invalid operator-settings.json file: ${err?.message || 'Parse error'}`);
+        } finally {
+            if (jsonImportInputRef.current) jsonImportInputRef.current.value = '';
+        }
+    };
+
+    // Group daily counts from logs + images for Event days / Busiest day / Bar Chart
+    const dailyActivityMap = useMemo(() => {
+        const map = new Map<string, number>();
+        if (logs.length > 0) {
+            logs.forEach(l => {
+                const d = l.timestamp.split('T')[0];
+                map.set(d, (map.get(d) || 0) + (l.amount || 1));
+            });
+        } else if (images.length > 0) {
+            images.forEach(img => {
+                const d = new Date(img.created_at).toISOString().split('T')[0];
+                map.set(d, (map.get(d) || 0) + 1);
             });
         }
+        return map;
+    }, [logs, images]);
 
-        logs.forEach(log => {
-            const logDate = log.timestamp.split('T')[0];
-            const dayEntry = lastDays.find(d => d.dateStr === logDate);
-            if (dayEntry) {
-                dayEntry.count += log.amount;
+    const eventDaysSummary = useMemo(() => {
+        const entries = Array.from(dailyActivityMap.entries())
+            .filter(([, count]) => count > 0)
+            .sort((a, b) => a[0].localeCompare(b[0]));
+
+        let busiestDate = '';
+        let busiestCount = 0;
+        entries.forEach(([d, c]) => {
+            if (c > busiestCount) {
+                busiestCount = c;
+                busiestDate = d;
             }
         });
 
-        return lastDays;
-    }, [logs, timeRange, customRange]);
+        const formattedBusiestDate = busiestDate
+            ? new Date(busiestDate + 'T12:00:00').toLocaleDateString(undefined, {
+                  weekday: 'short',
+                  month: 'short',
+                  day: 'numeric',
+                  year: 'numeric',
+              })
+            : 'No activity yet';
+
+        const eventDateLabels = entries.map(([d]) =>
+            new Date(d + 'T12:00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+        );
+
+        const lastPortraitDate =
+            entries.length > 0
+                ? new Date(entries[entries.length - 1][0] + 'T12:00:00').toLocaleDateString(undefined, {
+                      month: 'short',
+                      day: 'numeric',
+                      year: 'numeric',
+                  })
+                : project?.createdAt
+                  ? new Date(project.createdAt).toLocaleDateString(undefined, {
+                        month: 'short',
+                        day: 'numeric',
+                        year: 'numeric',
+                    })
+                  : '—';
+
+        return {
+            entries,
+            busiestCount,
+            formattedBusiestDate,
+            eventDaysCount: entries.length,
+            eventDateLabels: eventDateLabels.slice(-4).join(' · ') || 'No active days yet',
+            lastPortraitDate,
+        };
+    }, [dailyActivityMap, project?.createdAt]);
+
+    const barSeries = useMemo(() => {
+        if (chartRange === 'event') {
+            return eventDaysSummary.entries.map(([d, count]) => {
+                const dt = new Date(d + 'T12:00:00');
+                return {
+                    dateStr: d,
+                    label: dt.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }),
+                    sub: dt.toLocaleDateString(undefined, { weekday: 'short' }),
+                    count,
+                };
+            });
+        }
+
+        let daysCount = 7;
+        let start = new Date();
+        let end = new Date();
+
+        if (chartRange === '7d') {
+            daysCount = 7;
+            start.setDate(end.getDate() - 6);
+        } else if (chartRange === '30d') {
+            daysCount = 30;
+            start.setDate(end.getDate() - 29);
+        } else if (chartRange === '90d') {
+            daysCount = 90;
+            start.setDate(end.getDate() - 89);
+        } else if (chartRange === 'all') {
+            const allDates = eventDaysSummary.entries.map(([d]) => d);
+            if (allDates.length > 0) {
+                start = new Date(allDates[0] + 'T00:00:00');
+                end = new Date(allDates[allDates.length - 1] + 'T00:00:00');
+                daysCount = Math.max(
+                    1,
+                    Math.min(90, Math.ceil((end.getTime() - start.getTime()) / 86400000) + 1)
+                );
+            } else {
+                daysCount = 14;
+                start.setDate(end.getDate() - 13);
+            }
+        } else if (chartRange === 'custom') {
+            start = new Date(customRange.start + 'T00:00:00');
+            end = new Date(customRange.end + 'T00:00:00');
+            daysCount = Math.max(
+                1,
+                Math.min(90, Math.ceil((end.getTime() - start.getTime()) / 86400000) + 1)
+            );
+        }
+
+        const result: Array<{ dateStr: string; label: string; sub: string; count: number }> = [];
+        for (let i = 0; i < daysCount; i++) {
+            const d = new Date(start);
+            d.setDate(start.getDate() + i);
+            const iso = d.toISOString().split('T')[0];
+            result.push({
+                dateStr: iso,
+                label: d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }),
+                sub: d.toLocaleDateString(undefined, { weekday: 'short' }),
+                count: dailyActivityMap.get(iso) || 0,
+            });
+        }
+        return result;
+    }, [chartRange, customRange, dailyActivityMap, eventDaysSummary.entries]);
+
+    // Cost computation helper
+    const computeCostForModel = (modelId: string, refsCount: number) => {
+        const lower = (modelId || '').toLowerCase();
+        const matched =
+            costSettings.find(
+                c =>
+                    c.id.toLowerCase() === lower ||
+                    c.modelName.toLowerCase() === lower ||
+                    lower.includes(c.id.toLowerCase())
+            ) || costSettings[0] || DEFAULT_MODEL_COSTS[0];
+
+        const perPortrait =
+            refsCount <= 0
+                ? matched.promptOnly
+                : refsCount === 1
+                  ? matched.ref1
+                  : refsCount === 2
+                    ? matched.ref2
+                    : matched.ref3;
+        return {
+            matched,
+            perPortrait,
+        };
+    };
+
+    const boothCost = useMemo(
+        () => computeCostForModel(boothModel, boothRefs),
+        [boothModel, boothRefs, costSettings]
+    );
+
+    const settingsCost = useMemo(
+        () => computeCostForModel(settingsForm.selectedAiModel, settingsForm.referenceImagesCount),
+        [settingsForm.selectedAiModel, settingsForm.referenceImagesCount, costSettings]
+    );
+
+    // Distinct days in Gallery images
+    const galleryDistinctDays = useMemo(() => {
+        const set = new Set<string>();
+        images.forEach(img => {
+            const d = new Date(img.created_at).toISOString().split('T')[0];
+            set.add(d);
+        });
+        return Array.from(set).sort((a, b) => b.localeCompare(a));
+    }, [images]);
+
+    const filteredGalleryImages = useMemo(() => {
+        if (dayFilter === 'all') return images;
+        return images.filter(
+            img => new Date(img.created_at).toISOString().split('T')[0] === dayFilter
+        );
+    }, [images, dayFilter]);
 
     const processedDetails = useMemo(() => {
         if (!inspectImage) return [];
         const ctx = inspectImage.context || {};
         const meta = inspectImage.metadata || {};
-
         const displayItems: { label: string; value: string }[] = [];
 
-        // Merge prompt_1, prompt_2, prompt_11, etc.
         const promptKeys = Object.keys(ctx).filter(k => k.startsWith('prompt_'));
         if (promptKeys.length > 0) {
             const sortedPromptKeys = promptKeys.sort((a, b) => {
@@ -604,14 +1289,12 @@ export default function ProjectDetailPage() {
             displayItems.push({ label: 'Full Generation Prompt', value: fullPrompt });
         }
 
-        // Add other context fields (excluding the merged prompts)
         Object.entries(ctx).forEach(([key, value]) => {
             if (!key.startsWith('prompt_')) {
                 displayItems.push({ label: key.replace(/_/g, ' '), value });
             }
         });
 
-        // Add metadata fields (from structured metadata if any)
         Object.entries(meta).forEach(([key, value]) => {
             displayItems.push({ label: key.replace(/_/g, ' '), value });
         });
@@ -621,974 +1304,4150 @@ export default function ProjectDetailPage() {
 
     if (isLoading || !project || !user) {
         return (
-            <div className="min-h-screen bg-slate-50 flex items-center justify-center">
-                <div className="flex flex-col items-center gap-4">
-                    <Loader2 className="animate-spin text-indigo-600" size={48} />
-                    <p className="text-slate-500 font-medium tracking-wide">Fetching project details...</p>
+            <div style={{ minHeight: '60vh', display: 'grid', placeItems: 'center' }}>
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12 }}>
+                    <Loader2 className="animate-spin" style={{ color: 'var(--pink)' }} size={36} />
+                    <span className="lbl">Loading project…</span>
                 </div>
             </div>
         );
     }
 
-    const usagePercent = (project.currentGenerations / project.dailyLimit) * 100;
+    const usagePercent =
+        project.dailyLimit > 0 ? (project.currentGenerations / project.dailyLimit) * 100 : 0;
+    const remainingPortraits = Math.max(0, project.dailyLimit - project.currentGenerations);
+    const badgeState = getProjectBadgeState(project);
+    const isAdmin = user.role === UserRole.ADMIN;
+
+    const currentModalImageList =
+        activeTab === 'featured' ? featuredImages : filteredGalleryImages;
+    const lightboxIndex = lightboxImage
+        ? currentModalImageList.findIndex(i => i.public_id === lightboxImage.public_id)
+        : -1;
+    const inspectIndex = inspectImage
+        ? currentModalImageList.findIndex(i => i.public_id === inspectImage.public_id)
+        : -1;
+
+    const availableProfilesToAdd = allProfiles.filter(
+        p => !members.some(m => m.id === p.id)
+    );
+
+    const maxBarCount = Math.max(...barSeries.map(d => d.count), 1);
+    const totalSeriesPortraits = barSeries.reduce((acc, d) => acc + d.count, 0);
 
     return (
         <>
-            <div className="space-y-8 animate-in slide-in-from-bottom-4 duration-300">
-                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-                    <div className="flex items-center gap-4">
-                        <button
-                            onClick={() => router.push('/projects')}
-                            className="p-2 hover:bg-slate-100 rounded-full transition-colors text-slate-500"
-                        >
-                            <ArrowLeft size={20} />
-                        </button>
-                        <div>
-                            <h2 className="text-2xl font-bold text-slate-800">{project.name}</h2>
-                            <p className="text-slate-500 text-sm flex items-center gap-2">
-                                ID: {project.id} • <span className="text-indigo-600 font-medium">#{project.cloudinaryTag || 'No Tag'}</span>
-                            </p>
-                        </div>
+            {/* Top Back Link */}
+            <Link
+                href="/projects"
+                style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 8,
+                    fontSize: 13,
+                    fontWeight: 600,
+                    textDecoration: 'none',
+                    minHeight: 36,
+                    alignSelf: 'flex-start',
+                }}
+            >
+                <svg
+                    aria-hidden="true"
+                    width="16"
+                    height="16"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                >
+                    <path d="M15 6l-6 6 6 6" />
+                </svg>
+                All projects
+            </Link>
+
+            {/* Top Project Header */}
+            <header
+                className="emerge"
+                style={{
+                    display: 'flex',
+                    flexWrap: 'wrap',
+                    alignItems: 'flex-end',
+                    justifyContent: 'space-between',
+                    gap: 24,
+                }}
+            >
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+                        <span className={`pill ${badgeState.pillClass}`}>
+                            <i
+                                aria-hidden="true"
+                                className={badgeState.isLive ? 'live' : undefined}
+                            />
+                            {badgeState.label}
+                        </span>
+                        <span className="pill p-sand">
+                            <i aria-hidden="true" />
+                            {project.projectType === 'web' ? 'Web' : 'Desktop'}
+                        </span>
+                        <span className="lbl">Last portrait {eventDaysSummary.lastPortraitDate}</span>
                     </div>
 
-                    <div className="flex items-center gap-2 bg-white p-1 rounded-xl border border-slate-200">
-                        <button
-                            onClick={() => setActiveTab('overview')}
-                            className={`px-4 py-2 rounded-lg text-sm font-bold transition-all ${activeTab === 'overview' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-500 hover:text-slate-700'}`}
-                        >
-                            Overview
-                        </button>
-                        <button
-                            onClick={() => setActiveTab('images')}
-                            className={`px-4 py-2 rounded-lg text-sm font-bold transition-all ${activeTab === 'images' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-500 hover:text-slate-700'}`}
-                        >
-                            Generated Images
-                        </button>
-                        <button
-                            onClick={() => setActiveTab('featured')}
-                            className={`px-4 py-2 rounded-lg text-sm font-bold transition-all ${activeTab === 'featured' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-500 hover:text-slate-700'}`}
-                        >
-                            Featured
-                        </button>
-                        {user.role === UserRole.ADMIN && (
-                            <button
-                                onClick={() => setActiveTab('logs')}
-                                className={`px-4 py-2 rounded-lg text-sm font-bold transition-all ${activeTab === 'logs' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-500 hover:text-slate-700'}`}
-                            >
-                                API Logs
-                            </button>
-                        )}
-                    </div>
+                    <h1
+                        style={{
+                            margin: 0,
+                            fontSize: 'clamp(28px, 3.4vw, 44px)',
+                            fontWeight: 300,
+                            letterSpacing: '.04em',
+                            textTransform: 'uppercase',
+                            lineHeight: 1.1,
+                        }}
+                    >
+                        {project.name}
+                    </h1>
                 </div>
 
-                {activeTab === 'overview' && (
-                    <div className={`grid grid-cols-1 ${user.role === UserRole.ADMIN ? 'lg:grid-cols-3' : 'max-w-4xl mx-auto'} gap-8`}>
-                        <div className={user.role === UserRole.ADMIN ? 'lg:col-span-2 space-y-8' : 'space-y-8'}>
-                            <div className="bg-white p-8 rounded-2xl border border-slate-200 shadow-sm relative overflow-hidden">
-                                <div className="absolute top-0 right-0 p-8 opacity-5">
-                                    <Zap size={120} />
-                                </div>
-                                <div className="flex items-center justify-between mb-8">
-                                    <div>
-                                        <p className="text-slate-400 text-sm font-medium uppercase tracking-wider mb-1">Real-time Usage</p>
-                                        <div className="flex items-baseline gap-2">
-                                            <span className="text-4xl font-black text-slate-800">{project.currentGenerations}</span>
-                                            <span className="text-slate-400 font-medium">/ {project.dailyLimit} images</span>
-                                        </div>
-                                    </div>
-                                    <div className={`px-4 py-1.5 rounded-full text-xs font-bold uppercase tracking-widest ${project.status === 'active' ? 'bg-emerald-50 text-emerald-600' : 'bg-red-50 text-red-600'
-                                        }`}>
-                                        {project.status}
-                                    </div>
-                                </div>
-                                <div className="space-y-4">
-                                    <div className="w-full h-4 bg-slate-100 rounded-full overflow-hidden">
-                                        <div
-                                            className={`h-full transition-all duration-700 rounded-full ${usagePercent > 90 ? 'bg-red-500' : usagePercent > 70 ? 'bg-amber-500' : 'bg-indigo-500'
-                                                }`}
-                                            style={{ width: `${Math.min(100, usagePercent)}%` }}
-                                        />
-                                    </div>
-                                    <div className="flex justify-between text-sm">
-                                        <span className="text-slate-500 font-medium">{Math.floor(usagePercent)}% capacity used</span>
-                                        <span className="text-slate-800 font-bold">{project.dailyLimit - project.currentGenerations} remaining</span>
-                                    </div>
-                                </div>
-                            </div>
-
-                            <div className="bg-white p-8 rounded-2xl border border-slate-200 shadow-sm relative overflow-hidden">
-                                <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4 mb-6">
-                                    <h3 className="text-lg font-bold text-slate-800">Generations Activity</h3>
-                                    <div className="flex flex-wrap items-center gap-3">
-                                        {timeRange === 'custom' && (
-                                            <div className="flex items-center gap-2 bg-slate-50 p-1 rounded-xl border border-slate-100 animate-in fade-in slide-in-from-right-2 duration-300">
-                                                <input
-                                                    type="date"
-                                                    value={customRange.start}
-                                                    onChange={(e) => setCustomRange(prev => ({ ...prev, start: e.target.value }))}
-                                                    className="bg-transparent text-[10px] font-bold text-slate-600 outline-none px-2"
-                                                />
-                                                <span className="text-slate-300">-</span>
-                                                <input
-                                                    type="date"
-                                                    value={customRange.end}
-                                                    onChange={(e) => setCustomRange(prev => ({ ...prev, end: e.target.value }))}
-                                                    className="bg-transparent text-[10px] font-bold text-slate-600 outline-none px-2"
-                                                />
-                                            </div>
-                                        )}
-                                        <div className="flex items-center gap-2 bg-slate-50 p-1 rounded-xl border border-slate-100">
-                                            {[7, 30, 90].map((range) => (
-                                                <button
-                                                    key={range}
-                                                    onClick={() => setTimeRange(range as number)}
-                                                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${timeRange === range ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
-                                                >
-                                                    {range === 7 ? '7D' : range === 30 ? '30D' : '90D'}
-                                                </button>
-                                            ))}
-                                            <button
-                                                onClick={() => setTimeRange('custom')}
-                                                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${timeRange === 'custom' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
-                                            >
-                                                Custom
-                                            </button>
-                                            <div className="w-[1px] h-4 bg-slate-200 mx-1" />
-                                            <div className="flex items-center gap-1 px-2 text-slate-400">
-                                                <Calendar size={14} />
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-                                <div className="h-[300px] w-full">
-                                    <ResponsiveContainer width="100%" height="100%">
-                                        <AreaChart data={chartData}>
-                                            <defs>
-                                                <linearGradient id="colorCount" x1="0" y1="0" x2="0" y2="1">
-                                                    <stop offset="5%" stopColor="#4f46e5" stopOpacity={0.1} />
-                                                    <stop offset="95%" stopColor="#4f46e5" stopOpacity={0} />
-                                                </linearGradient>
-                                            </defs>
-                                            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                                            <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fill: '#94a3b8', fontSize: 12 }} dy={10} />
-                                            <YAxis axisLine={false} tickLine={false} tick={{ fill: '#94a3b8', fontSize: 12 }} />
-                                            <Tooltip
-                                                contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
-                                            />
-                                            <Area type="monotone" dataKey="count" stroke="#4f46e5" strokeWidth={3} fillOpacity={1} fill="url(#colorCount)" />
-                                        </AreaChart>
-                                    </ResponsiveContainer>
-                                </div>
-                            </div>
-
-                            {user.role === UserRole.ADMIN && (
-                                <div className="bg-slate-900 rounded-2xl p-8 text-white shadow-xl shadow-slate-200">
-                                    <div className="flex items-center justify-between mb-6">
-                                        <div className="flex items-center gap-3">
-                                            <div className="p-2 bg-indigo-500/20 rounded-lg text-indigo-400">
-                                                <Cpu size={24} />
-                                            </div>
-                                            <h3 className="text-xl font-bold">API Integration</h3>
-                                        </div>
-                                        <button
-                                            onClick={handleSimulateApiCall}
-                                            disabled={isSimulating || project.status === 'exhausted'}
-                                            className={`flex items-center gap-2 px-6 py-2 rounded-xl font-bold transition-all ${isSimulating || project.status === 'exhausted'
-                                                ? 'bg-slate-800 text-slate-500 cursor-not-allowed'
-                                                : 'bg-white text-slate-900 hover:bg-indigo-50 active:scale-95 shadow-lg shadow-white/10'
-                                                }`}
-                                        >
-                                            {isSimulating ? <RefreshCw className="animate-spin" size={18} /> : <Play size={18} />}
-                                            {isSimulating ? 'Sending Request...' : 'Simulate API Call'}
-                                        </button>
-                                    </div>
-                                    <p className="text-slate-400 mb-6 text-sm">
-                                        Use the endpoint below to increment image generation counts. Every request updates Cloudinary project usage.
-                                    </p>
-                                    <div className="space-y-4">
-                                        <div>
-                                            <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-2">Endpoint URL</label>
-                                            <div className="flex items-center gap-2 bg-slate-800 p-3 rounded-xl border border-slate-700">
-                                                <code className="text-indigo-400 text-sm flex-1 truncate">
-                                                    {origin}/api/projects/{project.id}/generate
-                                                </code>
-                                                <button
-                                                    onClick={() => copyToClipboard(`${origin}/api/projects/${project.id}/generate`)}
-                                                    className="p-2 hover:bg-slate-700 rounded-lg transition-colors text-slate-400"
-                                                >
-                                                    {copied ? <Check size={18} className="text-emerald-500" /> : <Copy size={18} />}
-                                                </button>
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-                            )}
-                        </div>
-
-                        {user.role === UserRole.ADMIN && (
-                            <div className="space-y-6">
-                                <div className="bg-white border border-slate-200 rounded-2xl p-6">
-                                    <h3 className="font-bold text-slate-800 flex items-center gap-2 mb-4">
-                                        <Users size={18} className="text-indigo-500" />
-                                        Team Members
-                                    </h3>
-
-                                    <div className="space-y-3 mb-6">
-                                        {members.map(member => (
-                                            <div key={member.id} className="flex items-center justify-between p-3 bg-slate-50 rounded-xl border border-slate-100 group">
-                                                <div className="flex items-center gap-3">
-                                                    <div className="w-8 h-8 rounded-full bg-indigo-50 flex items-center justify-center text-xs font-bold text-indigo-600">
-                                                        {member.avatar_url ? <img src={member.avatar_url} className="w-full h-full rounded-full" /> : member.full_name?.charAt(0)}
-                                                    </div>
-                                                    <div className="overflow-hidden">
-                                                        <p className="text-sm font-bold text-slate-800 truncate">{member.full_name}</p>
-                                                        <p className="text-[10px] text-slate-500 truncate">{member.email}</p>
-                                                    </div>
-                                                </div>
-                                                <button
-                                                    onClick={() => handleRemoveMember(member.memberId)}
-                                                    className="p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all opacity-0 group-hover:opacity-100"
-                                                >
-                                                    <UserMinus size={14} />
-                                                </button>
-                                            </div>
-                                        ))}
-                                        {members.length === 0 && (
-                                            <div className="py-6 text-center text-slate-400">
-                                                <p className="text-sm font-medium">No members assigned yet</p>
-                                            </div>
-                                        )}
-                                    </div>
-
-                                    <div className="pt-4 border-t border-slate-100">
-                                        <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-3">Add Member</label>
-                                        <div className="relative mb-3">
-                                            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
-                                            <input
-                                                placeholder="Search active users..."
-                                                value={searchQuery}
-                                                onChange={(e) => setSearchQuery(e.target.value)}
-                                                className="w-full pl-9 pr-4 py-2 bg-slate-50 border border-slate-100 rounded-xl text-xs focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
-                                            />
-                                        </div>
-
-                                        {searchQuery && (
-                                            <div className="max-h-40 overflow-y-auto border border-slate-100 rounded-xl divide-y divide-slate-50">
-                                                {allProfiles
-                                                    .filter(p => {
-                                                        const name = (p.full_name || '').toLowerCase();
-                                                        const email = (p.email || '').toLowerCase();
-                                                        const q = searchQuery.toLowerCase();
-                                                        return name.includes(q) || email.includes(q);
-                                                    })
-                                                    .filter(p => !members.find(m => m.id === p.id))
-                                                    .map(profile => (
-                                                        <button
-                                                            key={profile.id}
-                                                            onClick={() => {
-                                                                handleAddMember(profile.id);
-                                                                setSearchQuery('');
-                                                            }}
-                                                            className="w-full flex items-center justify-between p-3 hover:bg-slate-50 text-left transition-colors"
-                                                        >
-                                                            <div className="flex items-center gap-3">
-                                                                <div className="w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center text-xs font-bold text-slate-400">
-                                                                    {profile.full_name?.charAt(0) || profile.email?.charAt(0)}
-                                                                </div>
-                                                                <div>
-                                                                    <p className="text-sm font-bold text-slate-800">{profile.full_name || 'New User'}</p>
-                                                                    <p className="text-[10px] text-slate-500">{profile.email}</p>
-                                                                </div>
-                                                            </div>
-                                                            <UserPlus size={16} className="text-indigo-500" />
-                                                        </button>
-                                                    ))
-                                                }
-                                            </div>
-                                        )}
-                                    </div>
-                                </div>
-
-                                <div className="bg-white border border-slate-200 rounded-2xl p-6 space-y-6">
-                                    <div className="flex items-center justify-between">
-                                        <h3 className="font-bold text-slate-800 flex items-center gap-2">
-                                            <Settings size={18} className="text-slate-400" />
-                                            Project Settings
-                                        </h3>
-                                        <button
-                                            onClick={() => setShowEditModal(true)}
-                                            className="text-xs font-bold text-indigo-600 hover:text-indigo-700 bg-indigo-50 px-3 py-1 rounded-lg transition-colors"
-                                        >
-                                            Edit
-                                        </button>
-                                    </div>
-                                    <div className="space-y-4">
-                                        <div className="p-4 bg-slate-50 rounded-xl border border-slate-100">
-                                            <p className="text-xs font-bold text-slate-400 uppercase mb-2">Cloudinary Cloud</p>
-                                            <p className="font-medium text-slate-700">{project.cloudinaryCloudName || 'Managed via Global Settings'}</p>
-                                        </div>
-                                        <div className="p-4 bg-slate-50 rounded-xl border border-slate-100">
-                                            <p className="text-xs font-bold text-slate-400 uppercase mb-2">Tag / Folder Path</p>
-                                            <p className="font-medium text-slate-700">{project.cloudinaryTag || 'Not set'}</p>
-                                        </div>
-                                        <div className="p-4 bg-slate-50 rounded-xl border border-slate-100">
-                                            <p className="text-xs font-bold text-slate-400 uppercase mb-2">API Security</p>
-                                            <div className="flex items-center gap-2">
-                                                <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-100 uppercase">
-                                                    SDK Protected
-                                                </span>
-                                                <span className="text-[10px] text-indigo-500 font-bold uppercase tracking-widest bg-indigo-50 px-2 py-0.5 rounded border border-indigo-100">
-                                                    Supabase Secure
-                                                </span>
-                                            </div>
-                                        </div>
-                                        <div className="pt-4 border-t border-slate-100">
-                                            <button
-                                                onClick={handleDeleteProject}
-                                                disabled={isDeleting}
-                                                className="w-full py-2 flex items-center justify-center gap-2 text-red-500 hover:bg-red-50 rounded-xl transition-colors font-medium disabled:opacity-50"
-                                            >
-                                                {isDeleting ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />}
-                                                {isDeleting ? 'Deleting...' : 'Delete Project'}
-                                            </button>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        )}
-                    </div>
-                )}
-
-                {activeTab === 'images' && (
-                    <div className="bg-white border border-slate-200 rounded-2xl p-8 shadow-sm min-h-[500px]">
-                        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-8">
-                            <div>
-                                <h3 className="text-xl font-bold text-slate-800 flex items-center gap-2">
-                                    <ImageIcon className="text-indigo-500" />
-                                    Gallery
-                                </h3>
-                            </div>
-                            <div className="flex items-center gap-3">
-                                {selectedIds.length > 0 && (
-                                    <button
-                                        onClick={() => setSelectedIds([])}
-                                        className="px-4 py-2 bg-slate-100 text-slate-600 rounded-xl text-sm font-bold hover:bg-slate-200 transition-all"
-                                    >
-                                        Clear Selection
-                                    </button>
-                                )}
-                                <button
-                                    onClick={() => setSortOrder(sortOrder === 'desc' ? 'asc' : 'desc')}
-                                    className="flex items-center gap-2 px-4 py-2 bg-slate-50 hover:bg-slate-100 rounded-xl text-slate-600 text-sm font-bold transition-all"
-                                    title={sortOrder === 'desc' ? 'Sort Ascending' : 'Sort Descending'}
-                                >
-                                    <ArrowUpDown size={16} className={sortOrder === 'asc' ? 'rotate-180 transition-transform' : 'transition-transform'} />
-                                    {sortOrder === 'desc' ? 'Newest First' : 'Oldest First'}
-                                </button>
-                                <button
-                                    onClick={() => fetchImages()}
-                                    className="flex items-center gap-2 px-4 py-2 bg-slate-50 hover:bg-slate-100 rounded-xl text-slate-600 text-sm font-bold transition-all"
-                                >
-                                    <RefreshCw size={16} className={loadingImages ? 'animate-spin' : ''} />
-                                    Refresh
-                                </button>
-                            </div>
-                        </div>
-
-                        {selectedIds.length > 0 && images.length > 0 && (
-                            <div className="flex items-center justify-between mb-6 p-4 bg-indigo-50 rounded-2xl border border-indigo-100 animate-in slide-in-from-top-2 duration-300">
-                                <div className="flex items-center gap-4">
-                                    <button
-                                        onClick={toggleSelectAll}
-                                        className="text-sm font-bold text-indigo-600 hover:text-indigo-700 flex items-center gap-2"
-                                    >
-                                        <div className={`w-5 h-5 rounded border flex items-center justify-center ${selectedIds.length === images.length ? 'bg-indigo-600 border-indigo-600 text-white' : 'bg-white border-indigo-300'}`}>
-                                            {selectedIds.length === images.length && <Check size={14} />}
-                                        </div>
-                                        {selectedIds.length === images.length ? 'Deselect All' : 'Select All'}
-                                    </button>
-                                    <span className="text-sm text-indigo-400">|</span>
-                                    <span className="text-sm font-medium text-indigo-600">{selectedIds.length} images selected</span>
-                                </div>
-                                <button
-                                    onClick={handleBulkDownload}
-                                    disabled={selectedIds.length === 0}
-                                    className="flex items-center gap-2 px-6 py-2 bg-indigo-600 text-white rounded-xl text-sm font-bold hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-200 disabled:opacity-50 disabled:shadow-none"
-                                >
-                                    <Download size={18} />
-                                    Download Selected
-                                </button>
-                            </div>
-                        )}
-
-                        {!project.cloudinaryTag ? (
-                            <div className="flex flex-col items-center justify-center py-20 text-center">
-                                <div className="w-16 h-16 bg-amber-50 rounded-full flex items-center justify-center text-amber-500 mb-4">
-                                    <Info size={32} />
-                                </div>
-                                <h4 className="text-lg font-bold text-slate-800">Cloudinary Not Configured</h4>
-                                <p className="text-slate-500 max-w-sm mt-2">
-                                    Please set a Cloud Name and Tag in the project settings to fetch generated images from your Cloudinary account.
-                                </p>
-                            </div>
-                        ) : loadingImages ? (
-                            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
-                                {[1, 2, 3, 4, 5, 6, 7, 8].map(n => (
-                                    <div key={n} className="aspect-square bg-slate-100 rounded-2xl animate-pulse" />
-                                ))}
-                            </div>
-                        ) : (images.length > 0 || nextCursor) ? (
-                            <>
-                                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
-                                    {images.map(img => (
-                                        <div
-                                            key={img.public_id}
-                                            onClick={() => toggleImageSelection(img.public_id)}
-                                            className={`group relative aspect-square bg-slate-100 rounded-2xl overflow-hidden border-2 transition-all duration-300 cursor-pointer ${selectedIds.includes(img.public_id) ? 'border-indigo-600 shadow-xl' : 'border-transparent hover:border-indigo-200'}`}
-                                        >
-                                            <img
-                                                src={`https://res.cloudinary.com/${project.cloudinaryCloudName || 'placeholder'}/image/upload/w_400,c_fill,g_auto/v${img.version}/${img.public_id}.${img.format}`}
-                                                alt={img.public_id}
-                                                className={`w-full h-full object-cover transition-transform duration-500 ${selectedIds.includes(img.public_id) ? 'scale-95 opacity-90' : 'group-hover:scale-110'}`}
-                                            />
-
-                                            <div className={`absolute top-3 right-3 z-20 w-6 h-6 rounded-full border-2 flex items-center justify-center transition-all ${selectedIds.includes(img.public_id) ? 'bg-indigo-600 border-indigo-600 text-white active:scale-90' : 'bg-black/20 backdrop-blur-md border-white/50 opacity-0 group-hover:opacity-100'}`}>
-                                                {selectedIds.includes(img.public_id) && <Check size={16} />}
-                                            </div>
-
-                                            {img.tags?.includes('Featured') && (
-                                                <div className="absolute top-3 left-3 z-20 px-2 py-1 bg-amber-500 text-white text-[10px] font-bold rounded-lg shadow-lg flex items-center gap-1 animate-in zoom-in-95">
-                                                    <Zap size={10} fill="currentColor" />
-                                                    Featured
-                                                </div>
-                                            )}
-
-                                            <div className="absolute inset-0 bg-gradient-to-t from-slate-900/80 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity p-4 flex flex-col justify-end">
-                                                <p className="text-white text-[10px] font-bold truncate">
-                                                    {project.name} - {new Date(img.created_at).toLocaleString(undefined, {
-                                                        month: 'short',
-                                                        day: 'numeric',
-                                                        hour: '2-digit',
-                                                        minute: '2-digit'
-                                                    })}
-                                                </p>
-                                                <div className="flex items-center gap-2 mt-2">
-                                                    <button
-                                                        onClick={(e) => {
-                                                            e.stopPropagation();
-                                                            const dateStr = new Date(img.created_at).toLocaleString(undefined, {
-                                                                month: 'short',
-                                                                day: 'numeric',
-                                                                hour: '2-digit',
-                                                                minute: '2-digit'
-                                                            }).replace(/[,:]/g, '').replace(/\s+/g, '_');
-                                                            const fileName = `${project.name}_${dateStr}.${img.format}`;
-                                                            handleDownload(
-                                                                `https://res.cloudinary.com/${project.cloudinaryCloudName || 'placeholder'}/image/upload/v${img.version}/${img.public_id}.${img.format}`,
-                                                                fileName
-                                                            );
-                                                        }}
-                                                        className="p-1.5 bg-white/20 backdrop-blur-md rounded-lg text-white hover:bg-white/40 transition-colors"
-                                                        title="Download Image"
-                                                    >
-                                                        <Download size={14} />
-                                                    </button>
-                                                    <a
-                                                        href={`https://res.cloudinary.com/${project.cloudinaryCloudName || 'placeholder'}/image/upload/v${img.version}/${img.public_id}.${img.format}`}
-                                                        target="_blank"
-                                                        rel="noreferrer"
-                                                        onClick={(e) => e.stopPropagation()}
-                                                        className="p-1.5 bg-white/20 backdrop-blur-md rounded-lg text-white hover:bg-white/40 transition-colors"
-                                                        title="Open in new tab"
-                                                    >
-                                                        <ExternalLink size={14} />
-                                                    </a>
-                                                    <button
-                                                        onClick={(e) => {
-                                                            e.stopPropagation();
-                                                            handleToggleTag(img);
-                                                        }}
-                                                        disabled={taggingId === img.public_id}
-                                                        className={`p-1.5 backdrop-blur-md rounded-lg text-white transition-colors ${img.tags?.includes('Featured')
-                                                            ? 'bg-amber-500 hover:bg-amber-600'
-                                                            : 'bg-white/20 hover:bg-white/40'
-                                                            }`}
-                                                        title={img.tags?.includes('Featured') ? 'Remove from Featured' : 'Mark as Featured'}
-                                                    >
-                                                        {taggingId === img.public_id ? (
-                                                            <Loader2 size={14} className="animate-spin" />
-                                                        ) : img.tags?.includes('Featured') ? (
-                                                            <Star size={14} fill="currentColor" />
-                                                        ) : (
-                                                            <Star size={14} />
-                                                        )}
-                                                    </button>
-                                                    <button
-                                                        onClick={(e) => {
-                                                            e.stopPropagation();
-                                                            setInspectImage(img);
-                                                        }}
-                                                        className="p-1.5 bg-white/20 backdrop-blur-md rounded-lg text-white hover:bg-white/40 transition-colors"
-                                                        title="View Information"
-                                                    >
-                                                        <Info size={14} />
-                                                    </button>
-                                                </div>
-                                            </div>
-                                        </div>
-                                    ))}
-                                </div>
-                                {images.length === 0 && nextCursor && (
-                                    <div className="flex flex-col items-center justify-center py-20 text-center w-full">
-                                        <Loader2 className="animate-spin text-indigo-600 mb-4" size={32} />
-                                        <p className="text-slate-500 font-medium">Fetching more images...</p>
-                                    </div>
-                                )}
-                                {nextCursor && (
-                                    <div className="mt-12 flex justify-center">
-                                        <button
-                                            onClick={() => fetchImages(undefined, undefined, true)}
-                                            disabled={loadingMore}
-                                            className="flex items-center gap-2 px-8 py-3 bg-white border border-slate-200 rounded-xl text-slate-600 font-bold hover:bg-slate-50 hover:border-indigo-200 transition-all shadow-sm active:scale-95 disabled:opacity-50 disabled:active:scale-100"
-                                        >
-                                            {loadingMore ? <RefreshCw className="animate-spin" size={18} /> : null}
-                                            {loadingMore ? 'Loading More...' : 'Load More Images'}
-                                        </button>
-                                    </div>
-                                )}
-                            </>
-                        ) : (
-                            <div className="flex flex-col items-center justify-center py-20 text-center border-2 border-dashed border-slate-100 rounded-3xl">
-                                <div className="w-16 h-16 bg-slate-50 rounded-full flex items-center justify-center text-slate-300 mb-4">
-                                    <ImageIcon size={32} />
-                                </div>
-                                <h4 className="text-lg font-bold text-slate-800">No Images Found</h4>
-                                <p className="text-slate-500 max-w-sm mt-2">
-                                    We couldn't find any images for the tag <span className="font-bold">"{project.cloudinaryTag}"</span>. Make sure your photobooth is uploading assets to Cloudinary.
-                                </p>
-                                <div className="mt-6 p-4 bg-indigo-50 rounded-xl text-left">
-                                    <p className="text-xs font-bold text-indigo-600 uppercase mb-2 flex items-center gap-1">
-                                        <Info size={14} /> Tip for developers
-                                    </p>
-                                    <p className="text-xs text-indigo-900 leading-relaxed">
-                                        The dashboard now uses the <b>Cloudinary Node.js SDK</b> securely. Ensure you have provided your <b>API Key</b> and <b>Secret</b> in the global settings. No insecure "Resource List" settings are required on Cloudinary.
-                                    </p>
-                                </div>
-                            </div>
-                        )}
-                    </div>
-                )}
-
-                {activeTab === 'featured' && (
-                    <div className="bg-white border border-slate-200 rounded-2xl p-8 shadow-sm min-h-[500px]">
-                        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-8">
-                            <div>
-                                <h3 className="text-xl font-bold text-slate-800 flex items-center gap-2">
-                                    <Zap className="text-amber-500" />
-                                    Featured Photos
-                                </h3>
-                                <p className="text-slate-500 text-sm mt-1">High-quality photos tagged for Featured</p>
-                            </div>
-                            <div className="flex items-center gap-3">
-                                {selectedIds.length > 0 && (
-                                    <button
-                                        onClick={() => setSelectedIds([])}
-                                        className="px-4 py-2 bg-slate-100 text-slate-600 rounded-xl text-sm font-bold hover:bg-slate-200 transition-all"
-                                    >
-                                        Clear Selection
-                                    </button>
-                                )}
-                                <button
-                                    onClick={() => setSortOrder(sortOrder === 'desc' ? 'asc' : 'desc')}
-                                    className="flex items-center gap-2 px-4 py-2 bg-slate-50 hover:bg-slate-100 rounded-xl text-slate-600 text-sm font-bold transition-all"
-                                    title={sortOrder === 'desc' ? 'Sort Ascending' : 'Sort Descending'}
-                                >
-                                    <ArrowUpDown size={16} className={sortOrder === 'asc' ? 'rotate-180 transition-transform' : 'transition-transform'} />
-                                    {sortOrder === 'desc' ? 'Newest First' : 'Oldest First'}
-                                </button>
-                                <button
-                                    onClick={() => fetchFeaturedImages()}
-                                    className="flex items-center gap-2 px-4 py-2 bg-slate-50 hover:bg-slate-100 rounded-xl text-slate-600 text-sm font-bold transition-all"
-                                >
-                                    <RefreshCw size={16} className={loadingFeatured ? 'animate-spin' : ''} />
-                                    Refresh
-                                </button>
-                            </div>
-                        </div>
-
-                        {selectedIds.length > 0 && featuredImages.length > 0 && (
-                            <div className="flex items-center justify-between mb-6 p-4 bg-indigo-50 rounded-2xl border border-indigo-100 animate-in slide-in-from-top-2 duration-300">
-                                <div className="flex items-center gap-4">
-                                    <button
-                                        onClick={toggleSelectAll}
-                                        className="text-sm font-bold text-indigo-600 hover:text-indigo-700 flex items-center gap-2"
-                                    >
-                                        <div className={`w-5 h-5 rounded border flex items-center justify-center ${selectedIds.length === featuredImages.length ? 'bg-indigo-600 border-indigo-600 text-white' : 'bg-white border-indigo-300'}`}>
-                                            {selectedIds.length === featuredImages.length && <Check size={14} />}
-                                        </div>
-                                        {selectedIds.length === featuredImages.length ? 'Deselect All' : 'Select All'}
-                                    </button>
-                                    <span className="text-sm text-indigo-400">|</span>
-                                    <span className="text-sm font-medium text-indigo-600">{selectedIds.length} images selected</span>
-                                </div>
-                                <button
-                                    onClick={handleBulkDownload}
-                                    disabled={selectedIds.length === 0}
-                                    className="flex items-center gap-2 px-6 py-2 bg-indigo-600 text-white rounded-xl text-sm font-bold hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-200 disabled:opacity-50 disabled:shadow-none"
-                                >
-                                    <Download size={18} />
-                                    Download Selected
-                                </button>
-                            </div>
-                        )}
-
-                        {!project.cloudinaryTag ? (
-                            <div className="flex flex-col items-center justify-center py-20 text-center">
-                                <div className="w-16 h-16 bg-amber-50 rounded-full flex items-center justify-center text-amber-500 mb-4">
-                                    <Info size={32} />
-                                </div>
-                                <h4 className="text-lg font-bold text-slate-800">Cloudinary Not Configured</h4>
-                                <p className="text-slate-500 max-w-sm mt-2">
-                                    Please set a Cloud Name and Tag in the project settings to fetch featured photos from your Cloudinary account.
-                                </p>
-                            </div>
-                        ) : loadingFeatured ? (
-                            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
-                                {[1, 2, 3, 4, 5, 6, 7, 8].map(n => (
-                                    <div key={n} className="aspect-square bg-slate-100 rounded-2xl animate-pulse" />
-                                ))}
-                            </div>
-                        ) : (featuredImages.length > 0 || featuredCursor) ? (
-                            <>
-                                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
-                                    {featuredImages.map(img => (
-                                        <div
-                                            key={img.public_id}
-                                            onClick={() => toggleImageSelection(img.public_id)}
-                                            className={`group relative aspect-square bg-slate-100 rounded-2xl overflow-hidden border-2 transition-all duration-300 cursor-pointer ${selectedIds.includes(img.public_id) ? 'border-indigo-600 shadow-xl' : 'border-transparent hover:border-indigo-200'}`}
-                                        >
-                                            <img
-                                                src={`https://res.cloudinary.com/${project.cloudinaryCloudName || 'placeholder'}/image/upload/w_400,c_fill,g_auto/v${img.version}/${img.public_id}.${img.format}`}
-                                                alt={img.public_id}
-                                                className={`w-full h-full object-cover transition-transform duration-500 ${selectedIds.includes(img.public_id) ? 'scale-95 opacity-90' : 'group-hover:scale-110'}`}
-                                            />
-
-                                            <div className={`absolute top-3 right-3 z-20 w-6 h-6 rounded-full border-2 flex items-center justify-center transition-all ${selectedIds.includes(img.public_id) ? 'bg-indigo-600 border-indigo-600 text-white active:scale-90' : 'bg-black/20 backdrop-blur-md border-white/50 opacity-0 group-hover:opacity-100'}`}>
-                                                {selectedIds.includes(img.public_id) && <Check size={16} />}
-                                            </div>
-
-                                            <div className="absolute inset-0 bg-gradient-to-t from-slate-900/80 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity p-4 flex flex-col justify-end">
-                                                <p className="text-white text-[10px] font-bold truncate">
-                                                    {project.name} - {new Date(img.created_at).toLocaleString(undefined, {
-                                                        month: 'short',
-                                                        day: 'numeric',
-                                                        hour: '2-digit',
-                                                        minute: '2-digit'
-                                                    })}
-                                                </p>
-                                                <div className="flex items-center gap-2 mt-2">
-                                                    <button
-                                                        onClick={(e) => {
-                                                            e.stopPropagation();
-                                                            const dateStr = new Date(img.created_at).toLocaleString(undefined, {
-                                                                month: 'short',
-                                                                day: 'numeric',
-                                                                hour: '2-digit',
-                                                                minute: '2-digit'
-                                                            }).replace(/[,:]/g, '').replace(/\s+/g, '_');
-                                                            const fileName = `${project.name}_${dateStr}.${img.format}`;
-                                                            handleDownload(
-                                                                `https://res.cloudinary.com/${project.cloudinaryCloudName || 'placeholder'}/image/upload/v${img.version}/${img.public_id}.${img.format}`,
-                                                                fileName
-                                                            );
-                                                        }}
-                                                        className="p-1.5 bg-white/20 backdrop-blur-md rounded-lg text-white hover:bg-white/40 transition-colors"
-                                                        title="Download Image"
-                                                    >
-                                                        <Download size={14} />
-                                                    </button>
-                                                    <a
-                                                        href={`https://res.cloudinary.com/${project.cloudinaryCloudName || 'placeholder'}/image/upload/v${img.version}/${img.public_id}.${img.format}`}
-                                                        target="_blank"
-                                                        rel="noreferrer"
-                                                        onClick={(e) => e.stopPropagation()}
-                                                        className="p-1.5 bg-white/20 backdrop-blur-md rounded-lg text-white hover:bg-white/40 transition-colors"
-                                                        title="Open in new tab"
-                                                    >
-                                                        <ExternalLink size={14} />
-                                                    </a>
-                                                    <button
-                                                        onClick={(e) => {
-                                                            e.stopPropagation();
-                                                            handleToggleTag(img);
-                                                        }}
-                                                        disabled={taggingId === img.public_id}
-                                                        className={`p-1.5 backdrop-blur-md rounded-lg text-white transition-colors ${img.tags?.includes('Featured')
-                                                            ? 'bg-amber-500 hover:bg-amber-600'
-                                                            : 'bg-white/20 hover:bg-white/40'
-                                                            }`}
-                                                        title={img.tags?.includes('Featured') ? 'Remove from Featured' : 'Mark as Featured'}
-                                                    >
-                                                        {taggingId === img.public_id ? (
-                                                            <Loader2 size={14} className="animate-spin" />
-                                                        ) : img.tags?.includes('Featured') ? (
-                                                            <Star size={14} fill="currentColor" />
-                                                        ) : (
-                                                            <Star size={14} />
-                                                        )}
-                                                    </button>
-                                                    <button
-                                                        onClick={(e) => {
-                                                            e.stopPropagation();
-                                                            setInspectImage(img);
-                                                        }}
-                                                        className="p-1.5 bg-white/20 backdrop-blur-md rounded-lg text-white hover:bg-white/40 transition-colors"
-                                                        title="View Information"
-                                                    >
-                                                        <Info size={14} />
-                                                    </button>
-                                                </div>
-                                            </div>
-                                        </div>
-                                    ))}
-                                </div>
-                                {featuredImages.length === 0 && featuredCursor && (
-                                    <div className="flex flex-col items-center justify-center py-20 text-center w-full">
-                                        <Loader2 className="animate-spin text-indigo-600 mb-4" size={32} />
-                                        <p className="text-slate-500 font-medium">Fetching more featured photos...</p>
-                                    </div>
-                                )}
-
-                                {featuredCursor && (
-                                    <div className="mt-12 flex justify-center">
-                                        <button
-                                            onClick={() => fetchFeaturedImages(undefined, true)}
-                                            disabled={loadingMoreFeatured}
-                                            className="flex items-center gap-2 px-8 py-3 bg-white border border-slate-200 rounded-xl text-slate-600 font-bold hover:bg-slate-50 hover:border-indigo-200 transition-all shadow-sm active:scale-95 disabled:opacity-50 disabled:active:scale-100"
-                                        >
-                                            {loadingMoreFeatured ? <RefreshCw className="animate-spin" size={18} /> : null}
-                                            {loadingMoreFeatured ? 'Loading More...' : 'Load More Images'}
-                                        </button>
-                                    </div>
-                                )}
-                            </>
-                        ) : (
-                            <div className="flex flex-col items-center justify-center py-20 text-center border-2 border-dashed border-slate-100 rounded-3xl">
-                                <div className="w-16 h-16 bg-slate-50 rounded-full flex items-center justify-center text-slate-300 mb-4">
-                                    <Zap size={32} />
-                                </div>
-                                <h4 className="text-lg font-bold text-slate-800">No Featured Photos</h4>
-                                <p className="text-slate-500 max-w-sm mt-2">
-                                    Photos tagged with <span className="font-bold">"Featured"</span> will appear here. These are typically your best shots selected for the carousel.
-                                </p>
-                            </div>
-                        )}
-                    </div>
-                )}
-
-                {user.role === UserRole.ADMIN && activeTab === 'logs' && (
-                    <div className="bg-white border border-slate-200 rounded-2xl p-8 shadow-sm">
-                        <div className="flex items-center justify-between mb-8">
-                            <h3 className="text-xl font-bold text-slate-800 flex items-center gap-2">
-                                <History className="text-indigo-500" />
-                                API Access Logs
-                            </h3>
-                            <span className="text-xs font-bold text-slate-400 uppercase tracking-widest bg-slate-50 px-3 py-1 rounded-full">
-                                Real-time feed
+                {activeTab !== 'overview' && (
+                    <div
+                        style={{
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: 8,
+                            minWidth: 'min(280px, 100%)',
+                        }}
+                    >
+                        <div
+                            style={{
+                                display: 'flex',
+                                justifyContent: 'space-between',
+                                fontSize: 13,
+                            }}
+                        >
+                            <span style={{ fontWeight: 600 }}>
+                                {project.currentGenerations.toLocaleString()} of{' '}
+                                {project.dailyLimit.toLocaleString()} portraits
+                            </span>
+                            <span style={{ color: '#5C5C66' }}>
+                                {remainingPortraits.toLocaleString()} left
                             </span>
                         </div>
-                        <div className="space-y-4">
-                            {logs.map(log => (
-                                <div key={log.id} className="flex items-center justify-between p-4 rounded-xl bg-slate-50 border border-slate-100 group hover:bg-white hover:shadow-md transition-all">
-                                    <div className="flex items-center gap-4">
-                                        <div className="w-10 h-10 rounded-xl bg-white flex items-center justify-center text-emerald-500 border border-slate-100 shadow-sm group-hover:scale-110 transition-transform">
-                                            <Zap size={18} fill="currentColor" />
-                                        </div>
-                                        <div>
-                                            <p className="text-sm font-bold text-slate-800">Image Generation Increment (+{log.amount})</p>
-                                            <p className="text-xs text-slate-500">{new Date(log.timestamp).toLocaleString()} • Successful Request</p>
-                                        </div>
-                                    </div>
-                                    <div className="flex items-center gap-3">
-                                        <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 px-2 py-1 rounded border border-emerald-100">
-                                            HTTP 200 OK
-                                        </span>
-                                        <div className="h-4 w-[1px] bg-slate-200 hidden md:block" />
-                                        <span className="text-[10px] text-slate-400 font-mono hidden md:block">
-                                            ref: {log.id.split('-')[1]}
-                                        </span>
-                                    </div>
-                                </div>
-                            ))}
-                            {logs.length === 0 && (
-                                <div className="flex flex-col items-center justify-center py-20 text-slate-300">
-                                    <Activity size={48} className="opacity-20 mb-4" />
-                                    <p className="font-medium">No activity detected for this project yet</p>
-                                </div>
-                            )}
+                        <div
+                            style={{
+                                height: 4,
+                                background: '#E3DFD8',
+                                borderRadius: 2,
+                                overflow: 'hidden',
+                            }}
+                        >
+                            <div
+                                className="fill"
+                                style={{
+                                    width: `${Math.min(100, usagePercent)}%`,
+                                    height: 4,
+                                    borderRadius: 2,
+                                    background: '#FF0066',
+                                }}
+                            />
                         </div>
                     </div>
-                )
-                }
+                )}
+            </header>
+
+            {/* Tab Bar */}
+            <div
+                className="tabsrow"
+                role="tablist"
+                aria-label="Project sections"
+                style={{
+                    display: 'flex',
+                    flexWrap: 'wrap',
+                    gap: 32,
+                    borderBottom: '1px solid #E3DFD8',
+                }}
+            >
+                <button
+                    type="button"
+                    role="tab"
+                    aria-selected={activeTab === 'overview'}
+                    onClick={() => switchTab('overview')}
+                    className={`tab${activeTab === 'overview' ? ' on' : ''}`}
+                >
+                    Overview
+                </button>
+                <button
+                    type="button"
+                    role="tab"
+                    aria-selected={activeTab === 'gallery'}
+                    onClick={() => switchTab('gallery')}
+                    className={`tab${activeTab === 'gallery' ? ' on' : ''}`}
+                >
+                    Gallery
+                </button>
+                <button
+                    type="button"
+                    role="tab"
+                    aria-selected={activeTab === 'featured'}
+                    onClick={() => switchTab('featured')}
+                    className={`tab${activeTab === 'featured' ? ' on' : ''}`}
+                >
+                    Featured
+                </button>
+                {isAdmin && (
+                    <button
+                        type="button"
+                        role="tab"
+                        aria-selected={activeTab === 'settings'}
+                        onClick={() => switchTab('settings')}
+                        className={`tab${activeTab === 'settings' ? ' on' : ''}`}
+                    >
+                        Settings
+                    </button>
+                )}
             </div>
 
-            {mounted && showEditModal && createPortal(
-                <div
-                    className="fixed inset-0 z-[99999] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm overflow-y-auto"
-                    onClick={() => setShowEditModal(false)}
+            {/* ======================== OVERVIEW TAB ======================== */}
+            {activeTab === 'overview' && (
+                <section
+                    className="ovgrid"
+                    style={{
+                        display: 'grid',
+                        gridTemplateColumns: 'minmax(0, 1.55fr) minmax(300px, 1fr)',
+                        gap: 20,
+                        alignItems: 'start',
+                    }}
                 >
-                    <div
-                        className="bg-white w-full max-w-xl rounded-2xl p-8 animate-in zoom-in-95 duration-200 my-8 shadow-2xl relative"
-                        onClick={(e) => e.stopPropagation()}
-                    >
-                        <h2 className="text-2xl font-bold text-slate-800 mb-6">Edit Project</h2>
-                        <form onSubmit={handleUpdateProject} className="space-y-6">
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                <div className="space-y-4">
-                                    <h3 className="text-sm font-bold text-slate-400 uppercase tracking-widest">Basic Information</h3>
+                    {/* Left Column */}
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+                        {/* Real-time Usage Card + Printed Copies Counter */}
+                        <div className="card lift" style={{ padding: 28 }}>
+                            <div
+                                style={{
+                                    display: 'flex',
+                                    justifyContent: 'space-between',
+                                    alignItems: 'flex-start',
+                                    gap: 16,
+                                    flexWrap: 'wrap',
+                                }}
+                            >
+                                <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 36 }}>
                                     <div>
-                                        <label className="block text-sm font-medium text-slate-700 mb-1">Project Name</label>
-                                        <input
-                                            required
-                                            type="text"
-                                            value={editForm.name}
-                                            onChange={e => setEditForm({ ...editForm, name: e.target.value })}
-                                            className="w-full px-4 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none"
-                                        />
-                                    </div>
-                                    <div>
-                                        <label className="block text-sm font-medium text-slate-700 mb-1">Description</label>
-                                        <textarea
-                                            value={editForm.description}
-                                            onChange={e => setEditForm({ ...editForm, description: e.target.value })}
-                                            className="w-full px-4 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none"
-                                            rows={3}
-                                        />
-                                    </div>
-                                    <div>
-                                        <label className="block text-sm font-medium text-slate-700 mb-1">Daily Limit</label>
-                                        <input
-                                            type="number"
-                                            value={editForm.dailyLimit}
-                                            onChange={e => setEditForm({ ...editForm, dailyLimit: parseInt(e.target.value) })}
-                                            className="w-full px-4 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none"
-                                        />
-                                    </div>
-                                </div>
-
-                                <div className="space-y-4">
-                                    <h3 className="text-sm font-bold text-slate-400 uppercase tracking-widest">Gallery Configuration</h3>
-                                    <div>
-                                        <label className="block text-sm font-medium text-slate-700 mb-1">Asset Tag/Folder</label>
-                                        <input
-                                            type="text"
-                                            value={editForm.cloudinaryTag}
-                                            onChange={e => setEditForm({ ...editForm, cloudinaryTag: e.target.value })}
-                                            className="w-full px-4 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none"
-                                        />
-                                        <p className="mt-2 text-[10px] text-slate-400 leading-relaxed italic">
-                                            * Cloudinary Cloud Name and API credentials are now managed globally in Settings.
-                                        </p>
-                                    </div>
-                                </div>
-                            </div>
-
-                            <div className="flex gap-3 pt-4 border-t border-slate-100">
-                                <button
-                                    type="button"
-                                    onClick={() => setShowEditModal(false)}
-                                    className="flex-1 py-3 text-slate-600 font-medium hover:bg-slate-50 rounded-xl transition-colors"
-                                >
-                                    Cancel
-                                </button>
-                                <button
-                                    type="submit"
-                                    className="flex-1 py-3 bg-indigo-600 text-white font-bold rounded-xl hover:bg-indigo-700 transition-colors shadow-lg shadow-indigo-200"
-                                >
-                                    Save Changes
-                                </button>
-                            </div>
-                        </form>
-                    </div>
-                </div>,
-                document.body
-            )}
-
-            {mounted && inspectImage && createPortal(
-                <div
-                    className="fixed inset-0 z-[99999] flex justify-center items-center py-8 md:py-20 px-4 bg-slate-900/80 backdrop-blur-md overflow-y-auto"
-                    onClick={() => setInspectImage(null)}
-                >
-                    <div
-                        className="bg-white w-full max-w-4xl rounded-2xl overflow-hidden shadow-2xl animate-in zoom-in-95 duration-200 my-auto"
-                        onClick={(e) => e.stopPropagation()}
-                    >
-                        <div className="flex flex-col md:flex-row max-h-[85vh]">
-                            <div className="w-full md:w-3/5 bg-slate-100 flex items-center justify-center border-b md:border-b-0 md:border-r border-slate-100 min-h-[300px] md:min-h-0">
-                                <img
-                                    src={`https://res.cloudinary.com/${project?.cloudinaryCloudName || 'placeholder'}/image/upload/v${inspectImage.version}/${inspectImage.public_id}.${inspectImage.format}`}
-                                    alt={inspectImage.public_id}
-                                    className="w-full h-full object-contain max-h-[40vh] md:max-h-full"
-                                />
-                            </div>
-                            <div className="w-full md:w-2/5 p-8 flex flex-col min-h-0">
-                                <div className="flex items-center justify-between mb-6 shrink-0">
-                                    <h2 className="text-xl font-bold text-slate-800">Image Details</h2>
-                                    <button
-                                        onClick={() => setInspectImage(null)}
-                                        className="p-2 hover:bg-slate-100 rounded-full transition-colors text-slate-400 hover:text-slate-600"
-                                    >
-                                        <X size={20} />
-                                    </button>
-                                </div>
-
-                                <div className="space-y-6 overflow-y-auto flex-1 pr-2 custom-scrollbar">
-                                    <div>
-                                        <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Created At</label>
-                                        <p className="text-sm font-medium text-slate-700">
-                                            {new Date(inspectImage.created_at).toLocaleString()}
-                                        </p>
-                                    </div>
-                                    <div>
-                                        <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Dimensions</label>
-                                        <p className="text-sm font-medium text-slate-700">
-                                            {inspectImage.width} x {inspectImage.height} ({inspectImage.format.toUpperCase()})
-                                        </p>
-                                    </div>
-
-                                    {processedDetails.length > 0 ? (
-                                        <div className="space-y-4">
-                                            {processedDetails.map((item, idx) => (
-                                                <div key={idx}>
-                                                    <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">{item.label}</label>
-                                                    <div className="bg-slate-50 p-4 rounded-xl border border-slate-100 italic text-slate-600 text-sm leading-relaxed whitespace-pre-wrap">
-                                                        "{item.value}"
-                                                    </div>
-                                                </div>
-                                            ))}
+                                        <span className="lbl">Real-time usage</span>
+                                        <div
+                                            style={{
+                                                display: 'flex',
+                                                alignItems: 'baseline',
+                                                gap: 10,
+                                                marginTop: 8,
+                                            }}
+                                        >
+                                            <span
+                                                style={{
+                                                    fontWeight: 800,
+                                                    fontSize: 56,
+                                                    letterSpacing: '-.04em',
+                                                    lineHeight: 0.92,
+                                                    color: 'var(--pink)',
+                                                }}
+                                            >
+                                                {project.currentGenerations.toLocaleString()}
+                                            </span>
+                                            <span
+                                                style={{
+                                                    fontSize: 20,
+                                                    color: 'var(--muted)',
+                                                    fontWeight: 500,
+                                                }}
+                                            >
+                                                / {project.dailyLimit.toLocaleString()} portraits
+                                            </span>
                                         </div>
-                                    ) : (
-                                        <div>
-                                            <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Generation Context</label>
-                                            <p className="text-sm text-slate-400 italic">No prompt or context data available for this image.</p>
+                                    </div>
+
+                                    {project.projectType !== 'web' && project.enablePrinting && (
+                                        <div
+                                            style={{
+                                                paddingLeft: 32,
+                                                borderLeft: '1px solid #E3DFD8',
+                                            }}
+                                        >
+                                            <span
+                                                className="lbl"
+                                                style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
+                                            >
+                                                <Printer size={12} style={{ color: '#0B7A4B' }} />
+                                                Printed copies
+                                            </span>
+                                            <div
+                                                style={{
+                                                    display: 'flex',
+                                                    alignItems: 'baseline',
+                                                    gap: 10,
+                                                    marginTop: 8,
+                                                }}
+                                            >
+                                                <span
+                                                    style={{
+                                                        fontWeight: 800,
+                                                        fontSize: 56,
+                                                        letterSpacing: '-.04em',
+                                                        lineHeight: 0.92,
+                                                        color: 'var(--void)',
+                                                    }}
+                                                >
+                                                    {(project.totalPrintedCopies || 0).toLocaleString()}
+                                                </span>
+                                                <span
+                                                    style={{
+                                                        fontSize: 20,
+                                                        color: 'var(--muted)',
+                                                        fontWeight: 500,
+                                                    }}
+                                                >
+                                                    copies
+                                                </span>
+                                            </div>
                                         </div>
                                     )}
                                 </div>
 
-                                <div className="pt-6 mt-6 border-t border-slate-100 shrink-0">
-                                    <button
-                                        onClick={() => setInspectImage(null)}
-                                        className="w-full py-3 bg-indigo-600 text-white font-bold rounded-xl hover:bg-indigo-700 transition-colors shadow-lg shadow-indigo-200 active:scale-[0.98]"
+                                <span className={`pill ${badgeState.pillClass}`}>
+                                    <i
+                                        aria-hidden="true"
+                                        className={badgeState.isLive ? 'live' : undefined}
+                                    />
+                                    {badgeState.label}
+                                </span>
+                            </div>
+
+                            <div
+                                style={{
+                                    marginTop: 22,
+                                    height: 10,
+                                    background: '#E3DFD8',
+                                    borderRadius: 5,
+                                    overflow: 'hidden',
+                                }}
+                            >
+                                <div
+                                    className="fill"
+                                    style={{
+                                        width: `${Math.min(100, usagePercent)}%`,
+                                        height: '100%',
+                                        background: 'var(--pink)',
+                                        borderRadius: 5,
+                                    }}
+                                />
+                            </div>
+
+                            <div
+                                style={{
+                                    display: 'flex',
+                                    justifyContent: 'space-between',
+                                    marginTop: 10,
+                                    fontSize: 13,
+                                }}
+                            >
+                                <span style={{ color: 'var(--muted)' }}>
+                                    {usagePercent.toFixed(1)}% of the limit used
+                                </span>
+                                <span style={{ fontWeight: 700 }}>
+                                    {remainingPortraits.toLocaleString()} remaining
+                                </span>
+                            </div>
+                        </div>
+
+                        {/* 3 Mini KPI Cards */}
+                        <div
+                            className="stagger"
+                            style={{
+                                display: 'grid',
+                                gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
+                                gap: 14,
+                            }}
+                        >
+                            <div className="card lift" style={{ padding: 20 }}>
+                                <span className="lbl">Busiest day</span>
+                                <div
+                                    style={{
+                                        fontWeight: 800,
+                                        fontSize: 28,
+                                        letterSpacing: '-.03em',
+                                        marginTop: 8,
+                                    }}
+                                >
+                                    {eventDaysSummary.busiestCount}
+                                </div>
+                                <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 4 }}>
+                                    {eventDaysSummary.formattedBusiestDate}
+                                </div>
+                            </div>
+
+                            <div className="card lift" style={{ padding: 20 }}>
+                                <span className="lbl">Event days</span>
+                                <div
+                                    style={{
+                                        fontWeight: 800,
+                                        fontSize: 28,
+                                        letterSpacing: '-.03em',
+                                        marginTop: 8,
+                                    }}
+                                >
+                                    {eventDaysSummary.eventDaysCount}
+                                </div>
+                                <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 4 }}>
+                                    {eventDaysSummary.eventDateLabels}
+                                </div>
+                            </div>
+
+                            <div className="card lift" style={{ padding: 20 }}>
+                                <span className="lbl">Featured</span>
+                                <div
+                                    style={{
+                                        fontWeight: 800,
+                                        fontSize: 28,
+                                        letterSpacing: '-.03em',
+                                        marginTop: 8,
+                                        color: 'var(--pink)',
+                                    }}
+                                >
+                                    {featuredImages.length}
+                                </div>
+                                <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 4 }}>
+                                    on the carousel
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Portraits per day Bar Chart */}
+                        <div className="card" style={{ padding: 28 }}>
+                            <div
+                                style={{
+                                    display: 'flex',
+                                    justifyContent: 'space-between',
+                                    alignItems: 'flex-start',
+                                    gap: 16,
+                                    flexWrap: 'wrap',
+                                    marginBottom: 20,
+                                }}
+                            >
+                                <div>
+                                    <span className="lbl">Portraits per day</span>
+                                    <h3
+                                        style={{
+                                            fontWeight: 800,
+                                            fontSize: 22,
+                                            letterSpacing: '-.02em',
+                                            margin: '4px 0 0',
+                                        }}
                                     >
-                                        Close Details
+                                        {totalSeriesPortraits.toLocaleString()}{' '}
+                                        <span
+                                            style={{
+                                                fontWeight: 500,
+                                                fontSize: 14,
+                                                color: 'var(--muted)',
+                                            }}
+                                        >
+                                            {chartRange === 'event'
+                                                ? `across ${barSeries.length} active days`
+                                                : `across ${barSeries.length} days`}
+                                        </span>
+                                    </h3>
+                                </div>
+
+                                <div
+                                    style={{
+                                        display: 'flex',
+                                        gap: 8,
+                                        alignItems: 'center',
+                                        flexWrap: 'wrap',
+                                    }}
+                                >
+                                    <div
+                                        role="group"
+                                        aria-label="Date range"
+                                        style={{
+                                            display: 'flex',
+                                            flexWrap: 'wrap',
+                                            gap: 4,
+                                            padding: 4,
+                                            border: '1px solid #E3DFD8',
+                                            borderRadius: 4,
+                                        }}
+                                    >
+                                        {(
+                                            [
+                                                ['event', 'Event days'],
+                                                ['7d', '7 days'],
+                                                ['30d', '30 days'],
+                                                ['90d', '90 days'],
+                                                ['all', 'All time'],
+                                                ['custom', 'Custom…'],
+                                            ] as Array<[ChartRange, string]>
+                                        ).map(([key, label]) => (
+                                            <button
+                                                key={key}
+                                                type="button"
+                                                aria-pressed={chartRange === key}
+                                                className={`seg${chartRange === key ? ' on' : ''}`}
+                                                onClick={() => setChartRange(key)}
+                                            >
+                                                {label}
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+                            </div>
+
+                            {chartRange === 'custom' && (
+                                <div
+                                    style={{
+                                        display: 'flex',
+                                        gap: 8,
+                                        alignItems: 'center',
+                                        marginBottom: 18,
+                                        flexWrap: 'wrap',
+                                    }}
+                                >
+                                    <input
+                                        type="date"
+                                        className="field"
+                                        style={{ width: 'auto', padding: '7px 11px', fontSize: 12 }}
+                                        value={customRange.start}
+                                        onChange={e =>
+                                            setCustomRange(prev => ({ ...prev, start: e.target.value }))
+                                        }
+                                    />
+                                    <span style={{ color: 'var(--muted)', fontSize: 12 }}>to</span>
+                                    <input
+                                        type="date"
+                                        className="field"
+                                        style={{ width: 'auto', padding: '7px 11px', fontSize: 12 }}
+                                        value={customRange.end}
+                                        onChange={e =>
+                                            setCustomRange(prev => ({ ...prev, end: e.target.value }))
+                                        }
+                                    />
+                                </div>
+                            )}
+
+                            {barSeries.length === 0 || totalSeriesPortraits === 0 ? (
+                                <div
+                                    style={{
+                                        height: 220,
+                                        display: 'grid',
+                                        placeItems: 'center',
+                                        background: 'var(--ground)',
+                                        borderRadius: 12,
+                                        textAlign: 'center',
+                                        padding: 20,
+                                    }}
+                                >
+                                    <div>
+                                        <div style={{ fontWeight: 700, fontSize: 15 }}>
+                                            No portraits in this period
+                                        </div>
+                                        <div
+                                            style={{
+                                                fontSize: 12,
+                                                color: 'var(--muted)',
+                                                marginTop: 4,
+                                            }}
+                                        >
+                                            {eventDaysSummary.entries.length > 0
+                                                ? 'Switch to Event days to see active booth dates.'
+                                                : 'Portraits will appear here once the photobooth generates photos.'}
+                                        </div>
+                                        {chartRange !== 'event' && eventDaysSummary.entries.length > 0 && (
+                                            <button
+                                                type="button"
+                                                className="btn"
+                                                style={{
+                                                    marginTop: 12,
+                                                    padding: '7px 14px',
+                                                    fontSize: 12,
+                                                }}
+                                                onClick={() => setChartRange('event')}
+                                            >
+                                                Show event days
+                                            </button>
+                                        )}
+                                    </div>
+                                </div>
+                            ) : (
+                                <div
+                                    style={{
+                                        height: 220,
+                                        display: 'grid',
+                                        gridTemplateColumns: `repeat(${barSeries.length}, minmax(0, 1fr))`,
+                                        gap: barSeries.length > 30 ? 3 : barSeries.length > 14 ? 6 : 12,
+                                        alignItems: 'end',
+                                        paddingTop: 24,
+                                    }}
+                                >
+                                    {barSeries.map((d, i) => {
+                                        const hPct =
+                                            d.count === 0
+                                                ? 3
+                                                : Math.max(10, Math.round((d.count / maxBarCount) * 100));
+                                        const isPeak = d.count === maxBarCount && d.count > 0;
+                                        const showEvery =
+                                            barSeries.length > 40 ? 7 : barSeries.length > 16 ? 3 : 1;
+
+                                        return (
+                                            <div
+                                                key={d.dateStr}
+                                                title={`${d.label}: ${d.count} portraits`}
+                                                style={{
+                                                    display: 'flex',
+                                                    flexDirection: 'column',
+                                                    alignItems: 'center',
+                                                    height: '100%',
+                                                    justifyContent: 'flex-end',
+                                                    gap: 6,
+                                                }}
+                                            >
+                                                {barSeries.length <= 14 && (
+                                                    <span
+                                                        style={{
+                                                            fontSize: 12,
+                                                            fontWeight: 700,
+                                                            color: isPeak
+                                                                ? 'var(--pink)'
+                                                                : d.count
+                                                                  ? 'var(--ink)'
+                                                                  : 'var(--muted)',
+                                                        }}
+                                                    >
+                                                        {d.count}
+                                                    </span>
+                                                )}
+                                                <div
+                                                    className="bar"
+                                                    style={{
+                                                        width: '100%',
+                                                        maxWidth: 56,
+                                                        height: `${hPct}%`,
+                                                        borderRadius:
+                                                            barSeries.length > 30
+                                                                ? '3px 3px 2px 2px'
+                                                                : '8px 8px 4px 4px',
+                                                        background: isPeak
+                                                            ? 'var(--pink)'
+                                                            : d.count
+                                                              ? 'var(--void)'
+                                                              : 'var(--hair)',
+                                                        boxShadow: isPeak
+                                                            ? '0 8px 20px -4px rgba(255,0,102,.45)'
+                                                            : 'none',
+                                                        animationDelay: `${Math.min(i * 18, 400)}ms`,
+                                                    }}
+                                                />
+                                                <div
+                                                    style={{
+                                                        textAlign: 'center',
+                                                        lineHeight: 1.15,
+                                                        minHeight: 26,
+                                                    }}
+                                                >
+                                                    {i % showEvery === 0 && (
+                                                        <>
+                                                            <div
+                                                                style={{
+                                                                    fontSize: 11,
+                                                                    fontWeight: 600,
+                                                                    whiteSpace: 'nowrap',
+                                                                }}
+                                                            >
+                                                                {d.label}
+                                                            </div>
+                                                            {barSeries.length <= 14 && (
+                                                                <div
+                                                                    style={{
+                                                                        fontSize: 10,
+                                                                        color: 'var(--muted)',
+                                                                    }}
+                                                                >
+                                                                    {d.sub}
+                                                                </div>
+                                                            )}
+                                                        </>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            )}
+                        </div>
+                    </div>
+
+                    {/* Right Column */}
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+                        {/* Booth Setup Card */}
+                        {isAdmin ? (
+                            <div
+                                className="card"
+                                style={{ padding: 24, borderTop: '2px solid var(--pink)' }}
+                            >
+                                <div
+                                    style={{
+                                        display: 'flex',
+                                        justifyContent: 'space-between',
+                                        alignItems: 'center',
+                                        marginBottom: 14,
+                                    }}
+                                >
+                                    <div>
+                                        <span className="lbl" style={{ color: 'var(--pink)' }}>
+                                            Admin · Booth setup
+                                        </span>
+                                        <h3
+                                            style={{
+                                                fontWeight: 700,
+                                                fontSize: 16,
+                                                margin: '2px 0 0',
+                                            }}
+                                        >
+                                            Limit, model &amp; cost
+                                        </h3>
+                                    </div>
+                                    <button
+                                        type="button"
+                                        className="btn btn-pink"
+                                        onClick={handleSaveBoothSetup}
+                                        disabled={boothSaving}
+                                        style={{ padding: '7px 13px', fontSize: 12 }}
+                                    >
+                                        {boothSaving ? 'Saving…' : boothSaved ? '✓ Saved' : 'Save'}
+                                    </button>
+                                </div>
+
+                                <div
+                                    style={{
+                                        display: 'grid',
+                                        gridTemplateColumns: '1fr 1fr',
+                                        gap: 10,
+                                        marginBottom: 10,
+                                    }}
+                                >
+                                    <div>
+                                        <label
+                                            className="lbl"
+                                            style={{ display: 'block', marginBottom: 6 }}
+                                        >
+                                            Portrait limit
+                                        </label>
+                                        <input
+                                            type="number"
+                                            min={1}
+                                            className="field"
+                                            value={boothLimit}
+                                            onChange={e =>
+                                                setBoothLimit(Math.max(1, parseInt(e.target.value) || 0))
+                                            }
+                                        />
+                                    </div>
+                                    <div>
+                                        <label
+                                            className="lbl"
+                                            style={{ display: 'block', marginBottom: 6 }}
+                                        >
+                                            Reference images
+                                        </label>
+                                        <select
+                                            className="field"
+                                            value={boothRefs}
+                                            onChange={e => setBoothRefs(Number(e.target.value))}
+                                        >
+                                            <option value={0}>0 · prompt only</option>
+                                            <option value={1}>1 · face</option>
+                                            <option value={2}>2 · face + style</option>
+                                            <option value={3}>3 · face + style + bg</option>
+                                        </select>
+                                    </div>
+                                </div>
+
+                                <div style={{ marginBottom: 14 }}>
+                                    <label
+                                        className="lbl"
+                                        style={{ display: 'block', marginBottom: 6 }}
+                                    >
+                                        AI model
+                                    </label>
+                                    <select
+                                        className="field"
+                                        value={boothModel}
+                                        onChange={e => setBoothModel(e.target.value)}
+                                    >
+                                        {Array.from(
+                                            new Set([
+                                                ...settingsForm.aiModelsList,
+                                                ...costSettings.map(c => c.id),
+                                            ])
+                                        ).map(m => (
+                                            <option key={m} value={m}>
+                                                {m}
+                                            </option>
+                                        ))}
+                                    </select>
+                                </div>
+
+                                <div
+                                    style={{
+                                        background: 'var(--ground)',
+                                        borderRadius: 12,
+                                        padding: 14,
+                                        display: 'grid',
+                                        gridTemplateColumns: '1fr 1fr 1fr',
+                                        gap: 10,
+                                    }}
+                                >
+                                    <div>
+                                        <span className="lbl">Per portrait</span>
+                                        <div
+                                            style={{
+                                                fontWeight: 800,
+                                                fontSize: 18,
+                                                marginTop: 4,
+                                            }}
+                                        >
+                                            ${boothCost.perPortrait.toFixed(2)}
+                                        </div>
+                                        <div
+                                            style={{
+                                                fontSize: 10,
+                                                color: 'var(--muted)',
+                                                marginTop: 2,
+                                            }}
+                                        >
+                                            {boothRefs === 0
+                                                ? 'Prompt only'
+                                                : `${boothRefs} ref image${boothRefs > 1 ? 's' : ''}`}
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <span className="lbl">Spent so far</span>
+                                        <div
+                                            style={{
+                                                fontWeight: 800,
+                                                fontSize: 18,
+                                                marginTop: 4,
+                                                color: 'var(--pink)',
+                                            }}
+                                        >
+                                            $
+                                            {(
+                                                project.currentGenerations * boothCost.perPortrait
+                                            ).toFixed(2)}
+                                        </div>
+                                        <div
+                                            style={{
+                                                fontSize: 10,
+                                                color: 'var(--muted)',
+                                                marginTop: 2,
+                                            }}
+                                        >
+                                            {project.currentGenerations.toLocaleString()} made
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <span className="lbl">At full limit</span>
+                                        <div
+                                            style={{
+                                                fontWeight: 800,
+                                                fontSize: 18,
+                                                marginTop: 4,
+                                            }}
+                                        >
+                                            ${(boothLimit * boothCost.perPortrait).toFixed(2)}
+                                        </div>
+                                        <div
+                                            style={{
+                                                fontSize: 10,
+                                                color: 'var(--muted)',
+                                                marginTop: 2,
+                                            }}
+                                        >
+                                            {boothLimit.toLocaleString()} max
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div
+                                    style={{
+                                        fontSize: 11,
+                                        color: 'var(--muted)',
+                                        marginTop: 10,
+                                        display: 'flex',
+                                        justifyContent: 'space-between',
+                                    }}
+                                >
+                                    <span>Prices come from Cost settings</span>
+                                    <Link
+                                        href="/settings"
+                                        style={{
+                                            color: 'var(--ink)',
+                                            fontWeight: 600,
+                                            textDecoration: 'none',
+                                        }}
+                                    >
+                                        Edit prices →
+                                    </Link>
+                                </div>
+                            </div>
+                        ) : (
+                            <div className="card" style={{ padding: 24 }}>
+                                <span className="lbl">Booth setup</span>
+                                <h3
+                                    style={{
+                                        fontWeight: 700,
+                                        fontSize: 16,
+                                        margin: '4px 0 12px',
+                                    }}
+                                >
+                                    Active configuration
+                                </h3>
+                                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                                    <span className="pill pill-muted">
+                                        Limit {project.dailyLimit.toLocaleString()}
+                                    </span>
+                                    <span className="pill pill-muted">
+                                        {project.selectedAiModel || 'gpt-image-1.5'}
+                                    </span>
+                                    <span className="pill pill-muted">
+                                        {project.referenceImagesCount ?? 1} reference
+                                    </span>
+                                </div>
+                                <p
+                                    style={{
+                                        fontSize: 12,
+                                        color: 'var(--muted)',
+                                        margin: '12px 0 0',
+                                    }}
+                                >
+                                    Only admins can change the booth setup.
+                                </p>
+                            </div>
+                        )}
+
+                        {/* Team Members Card */}
+                        <div className="card" style={{ padding: 24 }}>
+                            <div
+                                style={{
+                                    display: 'flex',
+                                    justifyContent: 'space-between',
+                                    alignItems: 'center',
+                                    marginBottom: 14,
+                                }}
+                            >
+                                <h3 style={{ fontWeight: 700, fontSize: 16, margin: 0 }}>
+                                    Team members
+                                </h3>
+                                <span className="lbl">{members.length} assigned</span>
+                            </div>
+
+                            <div
+                                style={{
+                                    display: 'flex',
+                                    flexDirection: 'column',
+                                    gap: 10,
+                                    marginBottom: isAdmin ? 16 : 0,
+                                }}
+                            >
+                                {members.map((member, idx) => {
+                                    const [bgTint, fgTint] =
+                                        AVATAR_TINTS[idx % AVATAR_TINTS.length];
+                                    return (
+                                        <div
+                                            key={member.memberId || member.id}
+                                            style={{
+                                                display: 'flex',
+                                                alignItems: 'center',
+                                                gap: 10,
+                                                padding: 10,
+                                                borderRadius: 10,
+                                                background: 'var(--ground)',
+                                            }}
+                                        >
+                                            <div
+                                                style={{
+                                                    width: 34,
+                                                    height: 34,
+                                                    borderRadius: 99,
+                                                    background: bgTint,
+                                                    color: fgTint,
+                                                    display: 'grid',
+                                                    placeItems: 'center',
+                                                    fontWeight: 800,
+                                                    fontSize: 12,
+                                                    flexShrink: 0,
+                                                    overflow: 'hidden',
+                                                }}
+                                            >
+                                                {member.avatar_url ? (
+                                                    <img
+                                                        src={member.avatar_url}
+                                                        alt={member.full_name || ''}
+                                                        style={{
+                                                            width: '100%',
+                                                            height: '100%',
+                                                            objectFit: 'cover',
+                                                        }}
+                                                    />
+                                                ) : (
+                                                    getInitials(member.full_name, member.email)
+                                                )}
+                                            </div>
+                                            <div style={{ flex: 1, minWidth: 0 }}>
+                                                <div
+                                                    style={{
+                                                        fontWeight: 600,
+                                                        fontSize: 13,
+                                                        overflow: 'hidden',
+                                                        textOverflow: 'ellipsis',
+                                                        whiteSpace: 'nowrap',
+                                                    }}
+                                                >
+                                                    {member.full_name || 'Member'}
+                                                </div>
+                                                <div
+                                                    style={{
+                                                        fontSize: 11,
+                                                        color: 'var(--muted)',
+                                                        overflow: 'hidden',
+                                                        textOverflow: 'ellipsis',
+                                                        whiteSpace: 'nowrap',
+                                                    }}
+                                                >
+                                                    {member.email}
+                                                </div>
+                                            </div>
+                                            {isAdmin && (
+                                                <button
+                                                    type="button"
+                                                    className="icon-btn"
+                                                    title="Remove from project"
+                                                    onClick={() =>
+                                                        handleRemoveMember(member.memberId)
+                                                    }
+                                                >
+                                                    ✕
+                                                </button>
+                                            )}
+                                        </div>
+                                    );
+                                })}
+
+                                {members.length === 0 && (
+                                    <div
+                                        style={{
+                                            padding: '14px 10px',
+                                            textAlign: 'center',
+                                            fontSize: 12,
+                                            color: 'var(--muted)',
+                                            background: 'var(--ground)',
+                                            borderRadius: 10,
+                                        }}
+                                    >
+                                        No members assigned yet
+                                    </div>
+                                )}
+                            </div>
+
+                            {isAdmin && (
+                                <>
+                                    <label
+                                        className="lbl"
+                                        style={{ display: 'block', marginBottom: 6 }}
+                                    >
+                                        Add a person
+                                    </label>
+                                    <div style={{ display: 'flex', gap: 8 }}>
+                                        <select
+                                            className="field"
+                                            value={selectedUserIdToAdd}
+                                            onChange={e => setSelectedUserIdToAdd(e.target.value)}
+                                        >
+                                            <option value="">
+                                                {availableProfilesToAdd.length
+                                                    ? 'Choose a team member…'
+                                                    : 'Everyone is on this project'}
+                                            </option>
+                                            {availableProfilesToAdd.map(p => (
+                                                <option key={p.id} value={p.id}>
+                                                    {p.full_name || p.email} · {p.email}
+                                                </option>
+                                            ))}
+                                        </select>
+                                        <button
+                                            type="button"
+                                            className="btn"
+                                            disabled={!selectedUserIdToAdd}
+                                            onClick={() => handleAddMember(selectedUserIdToAdd)}
+                                            style={{ flexShrink: 0 }}
+                                        >
+                                            Add
+                                        </button>
+                                    </div>
+                                </>
+                            )}
+                        </div>
+
+                        {/* Project Settings Summary Card (Admin) */}
+                        {isAdmin && (
+                            <div className="card" style={{ padding: 24 }}>
+                                <div
+                                    style={{
+                                        display: 'flex',
+                                        justifyContent: 'space-between',
+                                        alignItems: 'center',
+                                        marginBottom: 14,
+                                    }}
+                                >
+                                    <h3 style={{ fontWeight: 700, fontSize: 16, margin: 0 }}>
+                                        Project settings
+                                    </h3>
+                                    <button
+                                        type="button"
+                                        className="btn"
+                                        style={{ padding: '6px 11px', fontSize: 12 }}
+                                        onClick={() => switchTab('settings')}
+                                    >
+                                        Edit
+                                    </button>
+                                </div>
+
+                                <div
+                                    style={{
+                                        display: 'flex',
+                                        flexDirection: 'column',
+                                        gap: 12,
+                                        fontSize: 13,
+                                    }}
+                                >
+                                    <div
+                                        style={{
+                                            padding: 12,
+                                            borderRadius: 10,
+                                            background: 'var(--ground)',
+                                        }}
+                                    >
+                                        <span className="lbl">Cloudinary cloud</span>
+                                        <div style={{ fontWeight: 600, marginTop: 3 }}>
+                                            {project.cloudinaryCloudName ||
+                                                'Managed via Global Settings'}
+                                        </div>
+                                    </div>
+
+                                    <div
+                                        style={{
+                                            padding: 12,
+                                            borderRadius: 10,
+                                            background: 'var(--ground)',
+                                        }}
+                                    >
+                                        <span className="lbl">Tag / folder path</span>
+                                        <div
+                                            style={{
+                                                fontWeight: 600,
+                                                marginTop: 3,
+                                                color: 'var(--pink)',
+                                            }}
+                                        >
+                                            #{project.cloudinaryFolder || project.cloudinaryTag || 'Not set'}
+                                        </div>
+                                    </div>
+
+                                    <div
+                                        style={{
+                                            padding: 12,
+                                            borderRadius: 10,
+                                            background: 'var(--ground)',
+                                        }}
+                                    >
+                                        <span className="lbl">API security</span>
+                                        <div
+                                            style={{
+                                                display: 'flex',
+                                                gap: 6,
+                                                marginTop: 6,
+                                                flexWrap: 'wrap',
+                                            }}
+                                        >
+                                        <span className="pill p-use">
+                                            <i aria-hidden="true" />
+                                            SDK protected
+                                        </span>
+                                        <span className="pill p-gray">
+                                            <i aria-hidden="true" />
+                                            Supabase secure
+                                        </span>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <button
+                                    type="button"
+                                    className="btn btn-danger"
+                                    onClick={() => {
+                                        setDeleteConfirmText('');
+                                        setDeleteStep(1);
+                                    }}
+                                    style={{
+                                        width: '100%',
+                                        justifyContent: 'center',
+                                        marginTop: 14,
+                                    }}
+                                >
+                                    Delete project…
+                                </button>
+                            </div>
+                        )}
+                    </div>
+                </section>
+            )}
+
+            {/* ======================== GALLERY TAB ======================== */}
+            {activeTab === 'gallery' && (
+                <section>
+                    <div
+                        style={{
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            alignItems: 'center',
+                            gap: 12,
+                            marginBottom: 18,
+                            flexWrap: 'wrap',
+                        }}
+                    >
+                        <div
+                            style={{
+                                display: 'flex',
+                                gap: 8,
+                                alignItems: 'center',
+                                flexWrap: 'wrap',
+                            }}
+                        >
+                            <select
+                                className="field"
+                                style={{ width: 'auto', padding: '9px 12px', fontSize: 12 }}
+                                value={dayFilter}
+                                onChange={e => setDayFilter(e.target.value)}
+                            >
+                                <option value="all">
+                                    All days
+                                </option>
+                                {galleryDistinctDays.map(d => (
+                                    <option key={d} value={d}>
+                                        {new Date(d + 'T12:00:00').toLocaleDateString(undefined, {
+                                            month: 'short',
+                                            day: 'numeric',
+                                            year: 'numeric',
+                                        })}
+                                    </option>
+                                ))}
+                            </select>
+
+                            <select
+                                className="field"
+                                style={{ width: 'auto', padding: '9px 12px', fontSize: 12 }}
+                                value={sortOrder}
+                                onChange={e => setSortOrder(e.target.value as 'desc' | 'asc')}
+                            >
+                                <option value="desc">Newest first</option>
+                                <option value="asc">Oldest first</option>
+                            </select>
+
+                            <button
+                                type="button"
+                                className="btn"
+                                style={{ padding: '9px 12px', fontSize: 12 }}
+                                onClick={() => fetchImages()}
+                            >
+                                <RefreshCw
+                                    size={13}
+                                    className={loadingImages ? 'animate-spin' : ''}
+                                />
+                                Refresh
+                            </button>
+
+                            <span style={{ fontSize: 12, color: 'var(--muted)', marginLeft: 4 }}>
+                                Showing{' '}
+                                <b style={{ color: 'var(--void)' }}>
+                                    {filteredGalleryImages.length}
+                                </b>{' '}
+                                {nextCursor ? 'loaded portraits' : 'portraits'}
+                            </span>
+                        </div>
+
+                        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                            {!isSelectionMode ? (
+                                <>
+                                    <button
+                                        type="button"
+                                        className="btn"
+                                        onClick={() => setIsSelectionMode(true)}
+                                    >
+                                        Select
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className="btn btn-pink"
+                                        disabled={filteredGalleryImages.length === 0}
+                                        onClick={() => handleBulkDownload(filteredGalleryImages)}
+                                    >
+                                        ⤓ Download all
+                                    </button>
+                                </>
+                            ) : (
+                                <>
+                                    <span className="pill p-pink">
+                                        {selectedIds.length} selected
+                                    </span>
+                                    <button
+                                        type="button"
+                                        className="btn"
+                                        onClick={toggleSelectAll}
+                                    >
+                                        {selectedIds.length === filteredGalleryImages.length &&
+                                        filteredGalleryImages.length > 0
+                                            ? 'Clear all'
+                                            : 'Select all'}
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className="btn"
+                                        onClick={() => {
+                                            setIsSelectionMode(false);
+                                            setSelectedIds([]);
+                                        }}
+                                    >
+                                        Cancel
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className="btn btn-danger"
+                                        disabled={selectedIds.length === 0}
+                                        onClick={() => {
+                                            const targets = filteredGalleryImages.filter(img =>
+                                                selectedIds.includes(img.public_id)
+                                            );
+                                            if (targets.length > 0) {
+                                                setDeleteImageTargets(targets);
+                                            }
+                                        }}
+                                    >
+                                        <Trash2 size={14} /> Delete {selectedIds.length || ''}
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className="btn btn-pink"
+                                        disabled={selectedIds.length === 0}
+                                        onClick={() => handleBulkDownload()}
+                                    >
+                                        ⤓ Download {selectedIds.length || ''}
+                                    </button>
+                                </>
+                            )}
+                        </div>
+                    </div>
+
+                    {!project.cloudinaryTag ? (
+                        <div
+                            className="card"
+                            style={{ padding: 48, textAlign: 'center' }}
+                        >
+                            <div style={{ fontWeight: 700, fontSize: 16 }}>
+                                Cloudinary folder not configured
+                            </div>
+                            <p
+                                style={{
+                                    color: 'var(--muted)',
+                                    fontSize: 13,
+                                    maxWidth: 380,
+                                    margin: '6px auto 16px',
+                                }}
+                            >
+                                Set a Cloudinary folder/tag in the project settings to view generated
+                                portraits.
+                            </p>
+                            {isAdmin && (
+                                <button
+                                    type="button"
+                                    className="btn btn-pink"
+                                    onClick={() => switchTab('settings')}
+                                >
+                                    Open Settings
+                                </button>
+                            )}
+                        </div>
+                    ) : loadingImages ? (
+                        <div
+                            className="galgrid"
+                            style={{
+                                display: 'grid',
+                                gridTemplateColumns: 'repeat(auto-fill, minmax(210px, 1fr))',
+                                gap: 20,
+                            }}
+                        >
+                            {[1, 2, 3, 4, 5, 6, 7, 8].map(n => (
+                                <div
+                                    key={n}
+                                    className="tile"
+                                    style={{ background: '#E3DFD8' }}
+                                />
+                            ))}
+                        </div>
+                    ) : filteredGalleryImages.length === 0 ? (
+                        <div
+                            className="card"
+                            style={{ padding: 48, textAlign: 'center' }}
+                        >
+                            <div style={{ fontWeight: 700, fontSize: 16 }}>
+                                No portraits found
+                            </div>
+                            <p style={{ color: 'var(--muted)', fontSize: 13, marginTop: 6 }}>
+                                New portraits generated by the booth will appear here automatically.
+                            </p>
+                        </div>
+                    ) : (
+                        <>
+                            <div
+                                className="stagger galgrid"
+                                style={{
+                                    display: 'grid',
+                                    gridTemplateColumns: 'repeat(auto-fill, minmax(210px, 1fr))',
+                                    gap: 20,
+                                }}
+                            >
+                                {filteredGalleryImages.map(img => {
+                                    const isFeatured = Boolean(img.tags?.includes('Featured'));
+                                    const isSel = selectedIds.includes(img.public_id);
+                                    const timeLabel = new Date(img.created_at).toLocaleString(
+                                        undefined,
+                                        {
+                                            month: 'short',
+                                            day: 'numeric',
+                                            hour: '2-digit',
+                                            minute: '2-digit',
+                                        }
+                                    );
+
+                                    return (
+                                        <div
+                                            key={img.public_id}
+                                            style={{
+                                                display: 'flex',
+                                                flexDirection: 'column',
+                                                gap: 8,
+                                                minWidth: 0,
+                                            }}
+                                        >
+                                            <div
+                                                className="tile"
+                                                style={{
+                                                    position: 'relative',
+                                                    aspectRatio: '2 / 3',
+                                                    borderRadius: 4,
+                                                    background: '#E3DFD8',
+                                                    overflow: 'hidden',
+                                                    outline: isSel ? '2px solid #FF0066' : 'none',
+                                                    outlineOffset: 3,
+                                                    transform: isSel ? 'scale(0.98)' : undefined,
+                                                }}
+                                            >
+                                                <img
+                                                    src={getThumbImageUrl(img)}
+                                                    alt={img.public_id}
+                                                    loading="lazy"
+                                                    style={{
+                                                        position: 'absolute',
+                                                        inset: 0,
+                                                        width: '100%',
+                                                        height: '100%',
+                                                        objectFit: 'cover',
+                                                        display: 'block',
+                                                    }}
+                                                />
+
+                                                {isSelectionMode ? (
+                                                    <button
+                                                        type="button"
+                                                        className="selhit"
+                                                        aria-pressed={isSel}
+                                                        aria-label={`Select portrait ${img.public_id}`}
+                                                        onClick={() =>
+                                                            toggleImageSelection(img.public_id)
+                                                        }
+                                                        style={{
+                                                            backgroundColor: isSel
+                                                                ? 'rgba(255,0,102,.14)'
+                                                                : undefined,
+                                                        }}
+                                                    >
+                                                        <span
+                                                            className={`check${isSel ? ' on' : ''}`}
+                                                            aria-hidden="true"
+                                                        >
+                                                            <svg
+                                                                width="16"
+                                                                height="16"
+                                                                viewBox="0 0 24 24"
+                                                                fill="none"
+                                                                stroke="currentColor"
+                                                                strokeWidth="3"
+                                                                strokeLinecap="round"
+                                                                strokeLinejoin="round"
+                                                            >
+                                                                <path d="M5 12.5l4.5 4.5L19 7.5" />
+                                                            </svg>
+                                                        </span>
+                                                    </button>
+                                                ) : (
+                                                    <button
+                                                        type="button"
+                                                        className="viewhit"
+                                                        aria-label="Open full view"
+                                                        onClick={() => setLightboxImage(img)}
+                                                    >
+                                                        <span>
+                                                            <svg
+                                                                aria-hidden="true"
+                                                                width="14"
+                                                                height="14"
+                                                                viewBox="0 0 24 24"
+                                                                fill="none"
+                                                                stroke="currentColor"
+                                                                strokeWidth="2.2"
+                                                                strokeLinecap="round"
+                                                                strokeLinejoin="round"
+                                                            >
+                                                                <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" />
+                                                            </svg>
+                                                            Full view
+                                                        </span>
+                                                    </button>
+                                                )}
+
+                                                {isFeatured && !isSelectionMode && (
+                                                    <span
+                                                        className="lbl"
+                                                        style={{
+                                                            position: 'absolute',
+                                                            top: 12,
+                                                            right: 12,
+                                                            pointerEvents: 'none',
+                                                            fontSize: 10,
+                                                            color: '#050507',
+                                                            background: '#FF0066',
+                                                            padding: '4px 8px',
+                                                            borderRadius: 2,
+                                                            zIndex: 2,
+                                                        }}
+                                                    >
+                                                        Featured
+                                                    </span>
+                                                )}
+                                            </div>
+
+                                            <div
+                                                className="tilerow"
+                                                style={{
+                                                    display: 'flex',
+                                                    alignItems: 'center',
+                                                    justifyContent: 'space-between',
+                                                    gap: 4,
+                                                }}
+                                            >
+                                                <span
+                                                    style={{
+                                                        fontSize: 12,
+                                                        color: '#5C5C66',
+                                                        whiteSpace: 'nowrap',
+                                                        overflow: 'hidden',
+                                                        textOverflow: 'ellipsis',
+                                                        minWidth: 0,
+                                                    }}
+                                                >
+                                                    {timeLabel}
+                                                </span>
+
+                                                <div style={{ display: 'flex', flex: 'none' }}>
+                                                    <button
+                                                        type="button"
+                                                        className={`icon-btn${isFeatured ? ' star-on' : ''}`}
+                                                        style={{ width: 28, height: 28 }}
+                                                        aria-pressed={isFeatured}
+                                                        title={
+                                                            isFeatured
+                                                                ? 'Remove from Featured'
+                                                                : 'Add to Featured'
+                                                        }
+                                                        disabled={taggingId === img.public_id}
+                                                        onClick={() => handleToggleTag(img)}
+                                                    >
+                                                        <svg
+                                                            aria-hidden="true"
+                                                            width="16"
+                                                            height="16"
+                                                            viewBox="0 0 24 24"
+                                                            fill={isFeatured ? 'currentColor' : 'none'}
+                                                            stroke="currentColor"
+                                                            strokeWidth="2"
+                                                            strokeLinejoin="round"
+                                                        >
+                                                            <path d="M12 3l2.8 5.7 6.2.9-4.5 4.4 1.1 6.2L12 17.3l-5.6 2.9 1.1-6.2L3 9.6l6.2-.9z" />
+                                                        </svg>
+                                                    </button>
+
+                                                    <button
+                                                        type="button"
+                                                        className="icon-btn"
+                                                        style={{ width: 28, height: 28 }}
+                                                        title="Download portrait"
+                                                        onClick={() => handleDownloadSingleImage(img)}
+                                                    >
+                                                        <svg
+                                                            aria-hidden="true"
+                                                            width="16"
+                                                            height="16"
+                                                            viewBox="0 0 24 24"
+                                                            fill="none"
+                                                            stroke="currentColor"
+                                                            strokeWidth="2"
+                                                            strokeLinecap="round"
+                                                            strokeLinejoin="round"
+                                                        >
+                                                            <path d="M12 4v11M7 10l5 5 5-5M5 20h14" />
+                                                        </svg>
+                                                    </button>
+
+                                                    <button
+                                                        type="button"
+                                                        className="icon-btn"
+                                                        style={{ width: 28, height: 28 }}
+                                                        title="QR Code"
+                                                        onClick={() => setQrModalImage(img)}
+                                                    >
+                                                        <QrCode size={15} />
+                                                    </button>
+
+                                                    <button
+                                                        type="button"
+                                                        className="icon-btn"
+                                                        style={{ width: 28, height: 28 }}
+                                                        title="Portrait details"
+                                                        onClick={() => setInspectImage(img)}
+                                                    >
+                                                        <svg
+                                                            aria-hidden="true"
+                                                            width="16"
+                                                            height="16"
+                                                            viewBox="0 0 24 24"
+                                                            fill="none"
+                                                            stroke="currentColor"
+                                                            strokeWidth="2"
+                                                            strokeLinecap="round"
+                                                        >
+                                                            <circle cx="12" cy="12" r="9" />
+                                                            <path d="M12 11v6M12 7.5v.5" />
+                                                        </svg>
+                                                    </button>
+
+                                                    <button
+                                                        type="button"
+                                                        className="icon-btn danger"
+                                                        style={{ width: 28, height: 28 }}
+                                                        title="Delete from Cloudinary"
+                                                        aria-label="Delete portrait from Cloudinary"
+                                                        onClick={() => setDeleteImageTargets([img])}
+                                                    >
+                                                        <Trash2 size={15} />
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+
+                            {nextCursor && (
+                                <div
+                                    style={{
+                                        display: 'flex',
+                                        justifyContent: 'center',
+                                        marginTop: 22,
+                                    }}
+                                >
+                                    <button
+                                        type="button"
+                                        className="btn"
+                                        disabled={loadingMore}
+                                        onClick={() => fetchImages(undefined, undefined, true)}
+                                    >
+                                        {loadingMore ? 'Loading…' : 'Load more portraits'}
+                                    </button>
+                                </div>
+                            )}
+                        </>
+                    )}
+                </section>
+            )}
+
+            {/* ======================== FEATURED TAB ======================== */}
+            {activeTab === 'featured' && (
+                <section>
+                    <div
+                        style={{
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            alignItems: 'center',
+                            marginBottom: 18,
+                            flexWrap: 'wrap',
+                            gap: 10,
+                        }}
+                    >
+                        <div>
+                            <div style={{ fontWeight: 700, fontSize: 15 }}>
+                                Featured portraits · {featuredImages.length}
+                            </div>
+                            <div style={{ fontSize: 12, color: 'var(--muted)' }}>
+                                These play on the event screen carousel. Click the star on any photo
+                                to remove it.
+                            </div>
+                        </div>
+                        {featuredImages.length > 0 && (
+                            <button
+                                type="button"
+                                className="btn btn-pink"
+                                onClick={() => handleBulkDownload(featuredImages)}
+                            >
+                                ⤓ Download all {featuredImages.length}
+                            </button>
+                        )}
+                    </div>
+
+                    {loadingFeatured ? (
+                        <div
+                            className="galgrid"
+                            style={{
+                                display: 'grid',
+                                gridTemplateColumns: 'repeat(auto-fill, minmax(210px, 1fr))',
+                                gap: 20,
+                            }}
+                        >
+                            {[1, 2, 3, 4].map(n => (
+                                <div
+                                    key={n}
+                                    className="tile"
+                                    style={{ background: '#E3DFD8' }}
+                                />
+                            ))}
+                        </div>
+                    ) : featuredImages.length === 0 ? (
+                        <div
+                            className="card"
+                            style={{ padding: 48, textAlign: 'center' }}
+                        >
+                            <div style={{ fontWeight: 700, fontSize: 16 }}>
+                                No featured portraits yet
+                            </div>
+                            <p
+                                style={{
+                                    color: 'var(--muted)',
+                                    fontSize: 13,
+                                    maxWidth: 380,
+                                    margin: '6px auto 16px',
+                                }}
+                            >
+                                Featured portraits play on the event screen carousel. Tap the ☆ on
+                                any portrait in the Gallery to add it here.
+                            </p>
+                            <button
+                                type="button"
+                                className="btn btn-pink"
+                                onClick={() => switchTab('gallery')}
+                            >
+                                Go to Gallery
+                            </button>
+                        </div>
+                    ) : (
+                        <>
+                            <div
+                                className="stagger galgrid"
+                                style={{
+                                    display: 'grid',
+                                    gridTemplateColumns: 'repeat(auto-fill, minmax(210px, 1fr))',
+                                    gap: 20,
+                                }}
+                            >
+                                {featuredImages.map(img => {
+                                    const timeLabel = new Date(img.created_at).toLocaleString(
+                                        undefined,
+                                        {
+                                            month: 'short',
+                                            day: 'numeric',
+                                            hour: '2-digit',
+                                            minute: '2-digit',
+                                        }
+                                    );
+                                    return (
+                                        <div
+                                            key={img.public_id}
+                                            style={{
+                                                display: 'flex',
+                                                flexDirection: 'column',
+                                                gap: 8,
+                                                minWidth: 0,
+                                            }}
+                                        >
+                                            <div
+                                                className="tile"
+                                                style={{
+                                                    position: 'relative',
+                                                    aspectRatio: '2 / 3',
+                                                    borderRadius: 4,
+                                                    background: '#E3DFD8',
+                                                    overflow: 'hidden',
+                                                }}
+                                            >
+                                                <img
+                                                    src={getThumbImageUrl(img)}
+                                                    alt={img.public_id}
+                                                    loading="lazy"
+                                                    style={{
+                                                        position: 'absolute',
+                                                        inset: 0,
+                                                        width: '100%',
+                                                        height: '100%',
+                                                        objectFit: 'cover',
+                                                        display: 'block',
+                                                    }}
+                                                />
+                                                <button
+                                                    type="button"
+                                                    className="viewhit"
+                                                    aria-label="Open full view"
+                                                    onClick={() => setLightboxImage(img)}
+                                                >
+                                                    <span>
+                                                        <svg
+                                                            aria-hidden="true"
+                                                            width="14"
+                                                            height="14"
+                                                            viewBox="0 0 24 24"
+                                                            fill="none"
+                                                            stroke="currentColor"
+                                                            strokeWidth="2.2"
+                                                            strokeLinecap="round"
+                                                            strokeLinejoin="round"
+                                                        >
+                                                            <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" />
+                                                        </svg>
+                                                        Full view
+                                                    </span>
+                                                </button>
+                                            </div>
+                                            <div
+                                                className="tilerow"
+                                                style={{
+                                                    display: 'flex',
+                                                    alignItems: 'center',
+                                                    justifyContent: 'space-between',
+                                                    gap: 4,
+                                                }}
+                                            >
+                                                <span
+                                                    style={{
+                                                        fontSize: 12,
+                                                        color: '#5C5C66',
+                                                        whiteSpace: 'nowrap',
+                                                        overflow: 'hidden',
+                                                        textOverflow: 'ellipsis',
+                                                        minWidth: 0,
+                                                    }}
+                                                >
+                                                    {timeLabel}
+                                                </span>
+                                                <div style={{ display: 'flex', flex: 'none' }}>
+                                                    <button
+                                                        type="button"
+                                                        className="icon-btn star-on"
+                                                        style={{ width: 28, height: 28 }}
+                                                        title="Remove from Featured"
+                                                        disabled={taggingId === img.public_id}
+                                                        onClick={() => handleToggleTag(img)}
+                                                    >
+                                                        <svg
+                                                            aria-hidden="true"
+                                                            width="16"
+                                                            height="16"
+                                                            viewBox="0 0 24 24"
+                                                            fill="currentColor"
+                                                            stroke="currentColor"
+                                                            strokeWidth="2"
+                                                            strokeLinejoin="round"
+                                                        >
+                                                            <path d="M12 3l2.8 5.7 6.2.9-4.5 4.4 1.1 6.2L12 17.3l-5.6 2.9 1.1-6.2L3 9.6l6.2-.9z" />
+                                                        </svg>
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        className="icon-btn"
+                                                        style={{ width: 28, height: 28 }}
+                                                        title="Download portrait"
+                                                        onClick={() => handleDownloadSingleImage(img)}
+                                                    >
+                                                        <svg
+                                                            aria-hidden="true"
+                                                            width="16"
+                                                            height="16"
+                                                            viewBox="0 0 24 24"
+                                                            fill="none"
+                                                            stroke="currentColor"
+                                                            strokeWidth="2"
+                                                            strokeLinecap="round"
+                                                            strokeLinejoin="round"
+                                                        >
+                                                            <path d="M12 4v11M7 10l5 5 5-5M5 20h14" />
+                                                        </svg>
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        className="icon-btn"
+                                                        style={{ width: 28, height: 28 }}
+                                                        title="QR Code"
+                                                        onClick={() => setQrModalImage(img)}
+                                                    >
+                                                        <QrCode size={15} />
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        className="icon-btn"
+                                                        style={{ width: 28, height: 28 }}
+                                                        title="Portrait details"
+                                                        onClick={() => setInspectImage(img)}
+                                                    >
+                                                        <svg
+                                                            aria-hidden="true"
+                                                            width="16"
+                                                            height="16"
+                                                            viewBox="0 0 24 24"
+                                                            fill="none"
+                                                            stroke="currentColor"
+                                                            strokeWidth="2"
+                                                            strokeLinecap="round"
+                                                        >
+                                                            <circle cx="12" cy="12" r="9" />
+                                                            <path d="M12 11v6M12 7.5v.5" />
+                                                        </svg>
+                                                    </button>
+
+                                                    <button
+                                                        type="button"
+                                                        className="icon-btn danger"
+                                                        style={{ width: 28, height: 28 }}
+                                                        title="Delete from Cloudinary"
+                                                        aria-label="Delete portrait from Cloudinary"
+                                                        onClick={() => setDeleteImageTargets([img])}
+                                                    >
+                                                        <Trash2 size={15} />
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+
+                            {featuredCursor && (
+                                <div
+                                    style={{
+                                        display: 'flex',
+                                        justifyContent: 'center',
+                                        marginTop: 22,
+                                    }}
+                                >
+                                    <button
+                                        type="button"
+                                        className="btn"
+                                        disabled={loadingMoreFeatured}
+                                        onClick={() => fetchFeaturedImages(undefined, true)}
+                                    >
+                                        {loadingMoreFeatured
+                                            ? 'Loading…'
+                                            : 'Load more featured'}
+                                    </button>
+                                </div>
+                            )}
+                        </>
+                    )}
+                </section>
+            )}
+
+            {/* ======================== SETTINGS TAB (ADMIN) ======================== */}
+            {isAdmin && activeTab === 'settings' && (
+                <form
+                    onSubmit={handleSaveProjectSettings}
+                    style={{ display: 'flex', flexDirection: 'column', gap: 20, maxWidth: 1020 }}
+                >
+                    {/* Top Action Banner */}
+                    <div
+                        className="card"
+                        style={{
+                            padding: 24,
+                            background: 'var(--void)',
+                            color: '#fff',
+                            borderColor: 'rgba(255,255,255,.08)',
+                        }}
+                    >
+                        <div
+                            style={{
+                                display: 'flex',
+                                justifyContent: 'space-between',
+                                alignItems: 'center',
+                                gap: 16,
+                                flexWrap: 'wrap',
+                            }}
+                        >
+                            <div>
+                                <span className="lbl" style={{ color: 'var(--pink)' }}>
+                                    Booth &amp; Operator Configuration
+                                </span>
+                                <h3
+                                    style={{
+                                        fontWeight: 700,
+                                        fontSize: 18,
+                                        margin: '4px 0 0',
+                                        color: '#fff',
+                                    }}
+                                >
+                                    Project &amp; operator-settings.json sync
+                                </h3>
+                            </div>
+
+                            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                                <button
+                                    type="button"
+                                    className="btn"
+                                    onClick={handleExportOperatorJson}
+                                    style={{
+                                        background: 'rgba(255,255,255,.08)',
+                                        color: '#fff',
+                                        borderColor: 'rgba(255,255,255,.14)',
+                                    }}
+                                >
+                                    <Download size={14} /> Export JSON
+                                </button>
+                                <button
+                                    type="button"
+                                    className="btn"
+                                    onClick={() => jsonImportInputRef.current?.click()}
+                                    style={{
+                                        background: 'rgba(255,255,255,.08)',
+                                        color: '#fff',
+                                        borderColor: 'rgba(255,255,255,.14)',
+                                    }}
+                                >
+                                    <Upload size={14} /> Import JSON
+                                </button>
+                                <input
+                                    ref={jsonImportInputRef}
+                                    type="file"
+                                    accept="application/json,.json"
+                                    onChange={handleImportOperatorJson}
+                                    style={{ display: 'none' }}
+                                />
+                                <button
+                                    type="submit"
+                                    className="btn btn-pink"
+                                    disabled={isSavingSettings}
+                                >
+                                    {isSavingSettings ? (
+                                        <Loader2 size={14} className="animate-spin" />
+                                    ) : (
+                                        <Save size={14} />
+                                    )}
+                                    {isSavingSettings ? 'Saving…' : 'Save all settings'}
+                                </button>
+                            </div>
+                        </div>
+
+                        {settingsError && (
+                            <div
+                                style={{
+                                    marginTop: 14,
+                                    padding: '10px 14px',
+                                    borderRadius: 10,
+                                    background: 'rgba(198,40,61,.2)',
+                                    color: '#FCA5A5',
+                                    fontSize: 12,
+                                    fontWeight: 600,
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: 8,
+                                }}
+                            >
+                                <AlertCircle size={15} /> {settingsError}
+                            </div>
+                        )}
+
+                        {settingsSaveSuccess && (
+                            <div
+                                style={{
+                                    marginTop: 14,
+                                    padding: '10px 14px',
+                                    borderRadius: 10,
+                                    background: 'rgba(22,163,74,.2)',
+                                    color: '#86EFAC',
+                                    fontSize: 12,
+                                    fontWeight: 600,
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: 8,
+                                }}
+                            >
+                                <Check size={15} /> Project &amp; Operator settings saved!
+                            </div>
+                        )}
+                    </div>
+
+                    {/* 1. Project details & Platform */}
+                    <div className="card" style={{ padding: 28 }}>
+                        <span className="lbl">Project details</span>
+                        <h3 style={{ fontWeight: 700, fontSize: 18, margin: '4px 0 18px' }}>
+                            Name, platform &amp; printing
+                        </h3>
+
+                        <div
+                            style={{
+                                display: 'grid',
+                                gridTemplateColumns: '1fr 1fr',
+                                gap: 14,
+                                marginBottom: 18,
+                            }}
+                        >
+                            <div>
+                                <label className="lbl" style={{ display: 'block', marginBottom: 6 }}>
+                                    Project name
+                                </label>
+                                <input
+                                    className="field"
+                                    required
+                                    value={settingsForm.name}
+                                    onChange={e =>
+                                        setSettingsForm(prev => ({ ...prev, name: e.target.value }))
+                                    }
+                                />
+                            </div>
+                            <div>
+                                <label className="lbl" style={{ display: 'block', marginBottom: 6 }}>
+                                    Platform type
+                                </label>
+                                <div
+                                    role="group"
+                                    style={{
+                                        width: '100%',
+                                        display: 'flex',
+                                        gap: 4,
+                                        padding: 4,
+                                        border: '1px solid #E3DFD8',
+                                        borderRadius: 4,
+                                    }}
+                                >
+                                    <button
+                                        type="button"
+                                        style={{ flex: 1 }}
+                                        className={`seg${settingsForm.projectType === 'desktop' ? ' on' : ''}`}
+                                        onClick={() =>
+                                            setSettingsForm(prev => ({
+                                                ...prev,
+                                                projectType: 'desktop',
+                                            }))
+                                        }
+                                    >
+                                        Desktop kiosk
+                                    </button>
+                                    <button
+                                        type="button"
+                                        style={{ flex: 1 }}
+                                        className={`seg${settingsForm.projectType === 'web' ? ' on' : ''}`}
+                                        onClick={() =>
+                                            setSettingsForm(prev => ({
+                                                ...prev,
+                                                projectType: 'web',
+                                                enablePrinting: false,
+                                                operatorSettings: {
+                                                    ...prev.operatorSettings,
+                                                    enablePrinting: false,
+                                                },
+                                            }))
+                                        }
+                                    >
+                                        Web app
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div style={{ marginBottom: settingsForm.projectType === 'desktop' ? 18 : 0 }}>
+                            <label className="lbl" style={{ display: 'block', marginBottom: 6 }}>
+                                Description &amp; notes
+                            </label>
+                            <textarea
+                                className="field"
+                                rows={2}
+                                value={settingsForm.description}
+                                onChange={e =>
+                                    setSettingsForm(prev => ({
+                                        ...prev,
+                                        description: e.target.value,
+                                    }))
+                                }
+                            />
+                        </div>
+
+                        {settingsForm.projectType === 'desktop' && (
+                            <div
+                                style={{
+                                    padding: 18,
+                                    borderRadius: 12,
+                                    background: 'var(--ground)',
+                                    display: 'flex',
+                                    justifyContent: 'space-between',
+                                    alignItems: 'center',
+                                    gap: 16,
+                                    flexWrap: 'wrap',
+                                }}
+                            >
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                                    <input
+                                        type="checkbox"
+                                        checked={settingsForm.enablePrinting}
+                                        onChange={e => {
+                                            const checked = e.target.checked;
+                                            setSettingsForm(prev => ({
+                                                ...prev,
+                                                enablePrinting: checked,
+                                                operatorSettings: {
+                                                    ...prev.operatorSettings,
+                                                    enablePrinting: checked,
+                                                },
+                                            }));
+                                        }}
+                                        style={{
+                                            width: 18,
+                                            height: 18,
+                                            accentColor: 'var(--pink)',
+                                            cursor: 'pointer',
+                                        }}
+                                    />
+                                    <div>
+                                        <div style={{ fontWeight: 700, fontSize: 14 }}>
+                                            Printing &amp; copies counter enabled
+                                        </div>
+                                        <div style={{ fontSize: 12, color: 'var(--muted)' }}>
+                                            Track physical prints from the kiosk on the Overview tab
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {settingsForm.enablePrinting && (
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                                        <div>
+                                            <span className="lbl" style={{ display: 'block' }}>
+                                                Total printed copies
+                                            </span>
+                                            <input
+                                                type="number"
+                                                min={0}
+                                                className="field"
+                                                style={{ width: 120, padding: '6px 10px' }}
+                                                value={settingsForm.totalPrintedCopies}
+                                                onChange={e =>
+                                                    setSettingsForm(prev => ({
+                                                        ...prev,
+                                                        totalPrintedCopies: Math.max(
+                                                            0,
+                                                            parseInt(e.target.value) || 0
+                                                        ),
+                                                    }))
+                                                }
+                                            />
+                                        </div>
+                                        <button
+                                            type="button"
+                                            className="btn"
+                                            disabled={isSimulatingPrint}
+                                            onClick={handleSimulatePrintIncrement}
+                                        >
+                                            {isSimulatingPrint ? 'Testing…' : '+1 Test print'}
+                                        </button>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                    </div>
+
+                    {/* 2. Booth setup, AI Models & Cost */}
+                    <div className="card" style={{ padding: 28 }}>
+                        <span className="lbl">Booth setup &amp; AI models</span>
+                        <h3 style={{ fontWeight: 700, fontSize: 18, margin: '4px 0 18px' }}>
+                            Portrait limit, models &amp; cost
+                        </h3>
+
+                        <div
+                            style={{
+                                display: 'grid',
+                                gridTemplateColumns: '1fr 1fr 1fr',
+                                gap: 14,
+                                marginBottom: 16,
+                            }}
+                        >
+                            <div>
+                                <label className="lbl" style={{ display: 'block', marginBottom: 6 }}>
+                                    Portrait limit
+                                </label>
+                                <input
+                                    type="number"
+                                    min={1}
+                                    className="field"
+                                    value={settingsForm.dailyLimit}
+                                    onChange={e =>
+                                        setSettingsForm(prev => ({
+                                            ...prev,
+                                            dailyLimit: Math.max(1, parseInt(e.target.value) || 0),
+                                        }))
+                                    }
+                                />
+                            </div>
+                            <div>
+                                <label className="lbl" style={{ display: 'block', marginBottom: 6 }}>
+                                    Active AI model (openaiModel)
+                                </label>
+                                <select
+                                    className="field"
+                                    value={settingsForm.selectedAiModel}
+                                    onChange={e => {
+                                        const m = e.target.value;
+                                        setSettingsForm(prev => ({
+                                            ...prev,
+                                            selectedAiModel: m,
+                                            operatorSettings: {
+                                                ...prev.operatorSettings,
+                                                openaiModel: m,
+                                            },
+                                        }));
+                                    }}
+                                >
+                                    {settingsForm.aiModelsList.map(m => (
+                                        <option key={m} value={m}>
+                                            {m}
+                                        </option>
+                                    ))}
+                                </select>
+                            </div>
+                            <div>
+                                <label className="lbl" style={{ display: 'block', marginBottom: 6 }}>
+                                    Reference images
+                                </label>
+                                <select
+                                    className="field"
+                                    value={settingsForm.referenceImagesCount}
+                                    onChange={e =>
+                                        setSettingsForm(prev => ({
+                                            ...prev,
+                                            referenceImagesCount: Number(e.target.value),
+                                        }))
+                                    }
+                                >
+                                    <option value={0}>0 · prompt only</option>
+                                    <option value={1}>1 · face</option>
+                                    <option value={2}>2 · face + style</option>
+                                    <option value={3}>3 · face + style + bg</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div
+                            style={{
+                                padding: 14,
+                                borderRadius: 12,
+                                background: 'var(--ground)',
+                                display: 'flex',
+                                justifyContent: 'space-between',
+                                alignItems: 'center',
+                                flexWrap: 'wrap',
+                                gap: 12,
+                                marginBottom: 18,
+                            }}
+                        >
+                            <div style={{ fontSize: 13 }}>
+                                Price per portrait:{' '}
+                                <b>${settingsCost.perPortrait.toFixed(2)}</b> · Spent so far:{' '}
+                                <b style={{ color: 'var(--pink)' }}>
+                                    $
+                                    {(
+                                        project.currentGenerations * settingsCost.perPortrait
+                                    ).toFixed(2)}
+                                </b>{' '}
+                                · At full limit:{' '}
+                                <b>
+                                    ${(settingsForm.dailyLimit * settingsCost.perPortrait).toFixed(2)}
+                                </b>
+                            </div>
+                            <Link
+                                href="/settings"
+                                style={{
+                                    fontSize: 12,
+                                    color: 'var(--ink)',
+                                    fontWeight: 600,
+                                    textDecoration: 'none',
+                                }}
+                            >
+                                Edit model prices in Settings →
+                            </Link>
+                        </div>
+
+                        {/* AI Models List management */}
+                        <div style={{ marginBottom: 18 }}>
+                            <label className="lbl" style={{ display: 'block', marginBottom: 6 }}>
+                                Available AI models list
+                            </label>
+                            <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+                                <input
+                                    type="text"
+                                    className="field"
+                                    value={newAiModelInput}
+                                    onChange={e => setNewAiModelInput(e.target.value)}
+                                    onKeyDown={e => {
+                                        if (e.key === 'Enter') {
+                                            e.preventDefault();
+                                            handleAddAiModel();
+                                        }
+                                    }}
+                                    placeholder="Add model ID (e.g. gpt-image-1.5)"
+                                />
+                                <button
+                                    type="button"
+                                    className="btn"
+                                    onClick={handleAddAiModel}
+                                >
+                                    + Add model
+                                </button>
+                            </div>
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                                {settingsForm.aiModelsList.map(m => {
+                                    const active = settingsForm.selectedAiModel === m;
+                                    return (
+                                        <span
+                                            key={m}
+                                            className={`chip${active ? ' on' : ''}`}
+                                            style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
+                                        >
+                                            <span
+                                                onClick={() =>
+                                                    setSettingsForm(prev => ({
+                                                        ...prev,
+                                                        selectedAiModel: m,
+                                                        operatorSettings: {
+                                                            ...prev.operatorSettings,
+                                                            openaiModel: m,
+                                                        },
+                                                    }))
+                                                }
+                                            >
+                                                {m}
+                                            </span>
+                                            <button
+                                                type="button"
+                                                onClick={() => handleRemoveAiModel(m)}
+                                                style={{
+                                                    border: 0,
+                                                    background: 'transparent',
+                                                    color: 'inherit',
+                                                    cursor: 'pointer',
+                                                    padding: 0,
+                                                    fontSize: 12,
+                                                }}
+                                            >
+                                                ✕
+                                            </button>
+                                        </span>
+                                    );
+                                })}
+                            </div>
+                        </div>
+
+                        <div
+                            style={{
+                                display: 'grid',
+                                gridTemplateColumns: '1fr 1fr 1fr',
+                                gap: 14,
+                            }}
+                        >
+                            <div>
+                                <label className="lbl" style={{ display: 'block', marginBottom: 6 }}>
+                                    Image quality
+                                </label>
+                                <select
+                                    className="field"
+                                    value={settingsForm.operatorSettings.imageQuality}
+                                    onChange={e =>
+                                        updateOpField(
+                                            'imageQuality',
+                                            e.target.value as 'high' | 'medium' | 'low'
+                                        )
+                                    }
+                                >
+                                    <option value="high">High</option>
+                                    <option value="medium">Medium</option>
+                                    <option value="low">Low</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label className="lbl" style={{ display: 'block', marginBottom: 6 }}>
+                                    OpenAI API Key
+                                </label>
+                                <div style={{ position: 'relative' }}>
+                                    <input
+                                        type={showSecrets.openaiKey ? 'text' : 'password'}
+                                        className="field"
+                                        value={settingsForm.operatorSettings.openaiApiKey}
+                                        onChange={e => updateOpField('openaiApiKey', e.target.value)}
+                                        placeholder="sk-proj-..."
+                                    />
+                                    <button
+                                        type="button"
+                                        onClick={() =>
+                                            setShowSecrets(p => ({ ...p, openaiKey: !p.openaiKey }))
+                                        }
+                                        style={{
+                                            position: 'absolute',
+                                            right: 10,
+                                            top: '50%',
+                                            transform: 'translateY(-50%)',
+                                            background: 'none',
+                                            border: 0,
+                                            cursor: 'pointer',
+                                            color: 'var(--muted)',
+                                        }}
+                                    >
+                                        {showSecrets.openaiKey ? <EyeOff size={14} /> : <Eye size={14} />}
+                                    </button>
+                                </div>
+                            </div>
+                            <div>
+                                <label className="lbl" style={{ display: 'block', marginBottom: 6 }}>
+                                    Gemini API Key
+                                </label>
+                                <div style={{ position: 'relative' }}>
+                                    <input
+                                        type={showSecrets.geminiKey ? 'text' : 'password'}
+                                        className="field"
+                                        value={settingsForm.operatorSettings.geminiApiKey}
+                                        onChange={e => updateOpField('geminiApiKey', e.target.value)}
+                                        placeholder="AIza..."
+                                    />
+                                    <button
+                                        type="button"
+                                        onClick={() =>
+                                            setShowSecrets(p => ({ ...p, geminiKey: !p.geminiKey }))
+                                        }
+                                        style={{
+                                            position: 'absolute',
+                                            right: 10,
+                                            top: '50%',
+                                            transform: 'translateY(-50%)',
+                                            background: 'none',
+                                            border: 0,
+                                            cursor: 'pointer',
+                                            color: 'var(--muted)',
+                                        }}
+                                    >
+                                        {showSecrets.geminiKey ? <EyeOff size={14} /> : <Eye size={14} />}
                                     </button>
                                 </div>
                             </div>
                         </div>
                     </div>
-                </div>,
-                document.body
+
+                    {/* 3. Storage & Connection (Cloudinary + APIs) */}
+                    <div className="card" style={{ padding: 28 }}>
+                        <span className="lbl">Storage &amp; connection</span>
+                        <h3 style={{ fontWeight: 700, fontSize: 18, margin: '4px 0 18px' }}>
+                            Cloudinary &amp; booth endpoints
+                        </h3>
+
+                        <div
+                            style={{
+                                display: 'grid',
+                                gridTemplateColumns: '1fr 1fr',
+                                gap: 14,
+                                marginBottom: 16,
+                            }}
+                        >
+                            <div>
+                                <label className="lbl" style={{ display: 'block', marginBottom: 6 }}>
+                                    Cloudinary cloud name
+                                </label>
+                                <input
+                                    className="field"
+                                    value={settingsForm.cloudinaryCloudName}
+                                    onChange={e =>
+                                        setSettingsForm(prev => ({
+                                            ...prev,
+                                            cloudinaryCloudName: e.target.value,
+                                            operatorSettings: {
+                                                ...prev.operatorSettings,
+                                                cloudinaryCloudName: e.target.value,
+                                            },
+                                        }))
+                                    }
+                                    placeholder="e.g. dniredeim"
+                                />
+                            </div>
+                            <div>
+                                <label className="lbl" style={{ display: 'block', marginBottom: 6 }}>
+                                    Cloudinary folder / tag
+                                </label>
+                                <input
+                                    className="field"
+                                    value={settingsForm.cloudinaryFolder}
+                                    onChange={e =>
+                                        setSettingsForm(prev => ({
+                                            ...prev,
+                                            cloudinaryFolder: e.target.value,
+                                            operatorSettings: {
+                                                ...prev.operatorSettings,
+                                                cloudinaryFolder: e.target.value,
+                                            },
+                                        }))
+                                    }
+                                    placeholder="e.g. Egyptian-Museum-Photobooth"
+                                />
+                            </div>
+                            <div>
+                                <label className="lbl" style={{ display: 'block', marginBottom: 6 }}>
+                                    Cloudinary API Key
+                                </label>
+                                <input
+                                    className="field"
+                                    value={settingsForm.cloudinaryApiKey}
+                                    onChange={e =>
+                                        setSettingsForm(prev => ({
+                                            ...prev,
+                                            cloudinaryApiKey: e.target.value,
+                                            operatorSettings: {
+                                                ...prev.operatorSettings,
+                                                cloudinaryApiKey: e.target.value,
+                                            },
+                                        }))
+                                    }
+                                    placeholder="Leave blank to use Global Settings"
+                                />
+                            </div>
+                            <div>
+                                <label className="lbl" style={{ display: 'block', marginBottom: 6 }}>
+                                    Cloudinary API Secret
+                                </label>
+                                <div style={{ position: 'relative' }}>
+                                    <input
+                                        type={showSecrets.cloudinarySecret ? 'text' : 'password'}
+                                        className="field"
+                                        value={settingsForm.cloudinaryApiSecret}
+                                        onChange={e =>
+                                            setSettingsForm(prev => ({
+                                                ...prev,
+                                                cloudinaryApiSecret: e.target.value,
+                                                operatorSettings: {
+                                                    ...prev.operatorSettings,
+                                                    cloudinaryApiSecret: e.target.value,
+                                                },
+                                            }))
+                                        }
+                                        placeholder="••••••••••••••••"
+                                    />
+                                    <button
+                                        type="button"
+                                        onClick={() =>
+                                            setShowSecrets(p => ({
+                                                ...p,
+                                                cloudinarySecret: !p.cloudinarySecret,
+                                            }))
+                                        }
+                                        style={{
+                                            position: 'absolute',
+                                            right: 10,
+                                            top: '50%',
+                                            transform: 'translateY(-50%)',
+                                            background: 'none',
+                                            border: 0,
+                                            cursor: 'pointer',
+                                            color: 'var(--muted)',
+                                        }}
+                                    >
+                                        {showSecrets.cloudinarySecret ? (
+                                            <EyeOff size={14} />
+                                        ) : (
+                                            <Eye size={14} />
+                                        )}
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div
+                            style={{
+                                display: 'grid',
+                                gridTemplateColumns: '1fr 1fr',
+                                gap: 14,
+                                marginBottom: 16,
+                            }}
+                        >
+                            <div>
+                                <label className="lbl" style={{ display: 'block', marginBottom: 6 }}>
+                                    Photo Viewer URL (QR Target)
+                                </label>
+                                <input
+                                    type="url"
+                                    className="field"
+                                    value={settingsForm.operatorSettings.photoViewerUrl}
+                                    onChange={e => updateOpField('photoViewerUrl', e.target.value)}
+                                />
+                            </div>
+                            <div>
+                                <label className="lbl" style={{ display: 'block', marginBottom: 6 }}>
+                                    Project ID
+                                </label>
+                                <div style={{ display: 'flex', gap: 8 }}>
+                                    <input className="field" readOnly value={project.id} />
+                                    <button
+                                        type="button"
+                                        className="btn"
+                                        onClick={() => copyProjectId(project.id)}
+                                    >
+                                        {copiedId ? '✓ Copied' : 'Copy ID'}
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Endpoints */}
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                            <div>
+                                <label className="lbl" style={{ display: 'block', marginBottom: 6 }}>
+                                    Booth portrait counter URL (POST)
+                                </label>
+                                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                                    <input
+                                        className="field"
+                                        style={{ flex: 1 }}
+                                        readOnly
+                                        value={`${origin}/api/projects/${project.id}/generate`}
+                                    />
+                                    <button
+                                        type="button"
+                                        className="btn"
+                                        onClick={() =>
+                                            copyToClipboard(
+                                                `${origin}/api/projects/${project.id}/generate`
+                                            )
+                                        }
+                                    >
+                                        {copied ? '✓ Copied' : 'Copy URL'}
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className="btn"
+                                        disabled={isSimulating}
+                                        onClick={handleSimulateApiCall}
+                                    >
+                                        {isSimulating ? 'Sending…' : 'Send test'}
+                                    </button>
+                                </div>
+                            </div>
+
+                            <div>
+                                <label className="lbl" style={{ display: 'block', marginBottom: 6 }}>
+                                    Settings Sync URL (GET / POST / PUT)
+                                </label>
+                                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                                    <input
+                                        className="field"
+                                        style={{ flex: 1 }}
+                                        readOnly
+                                        value={`${origin}/api/projects/${project.id}/settings`}
+                                    />
+                                    <button
+                                        type="button"
+                                        className="btn"
+                                        onClick={() =>
+                                            copySyncUrlToClipboard(
+                                                `${origin}/api/projects/${project.id}/settings`
+                                            )
+                                        }
+                                    >
+                                        {copiedSyncUrl ? '✓ Copied' : 'Copy URL'}
+                                    </button>
+                                </div>
+                            </div>
+
+                            {settingsForm.projectType === 'desktop' && (
+                                <div>
+                                    <label
+                                        className="lbl"
+                                        style={{ display: 'block', marginBottom: 6 }}
+                                    >
+                                        Print Copies Tracking URL (POST)
+                                    </label>
+                                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                                        <input
+                                            className="field"
+                                            style={{ flex: 1 }}
+                                            readOnly
+                                            value={`${origin}/api/projects/${project.id}/print`}
+                                        />
+                                        <button
+                                            type="button"
+                                            className="btn"
+                                            onClick={() =>
+                                                copyPrintUrlToClipboard(
+                                                    `${origin}/api/projects/${project.id}/print`
+                                                )
+                                            }
+                                        >
+                                            {copiedPrintUrl ? '✓ Copied' : 'Copy URL'}
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+
+                    {/* 4. Desktop-only sections: Printer Routing, Camera & Timers, Kiosk Security */}
+                    {settingsForm.projectType === 'desktop' && (
+                        <>
+                            <div className="card" style={{ padding: 28 }}>
+                                <span className="lbl">Hardware printing</span>
+                                <h3
+                                    style={{
+                                        fontWeight: 700,
+                                        fontSize: 18,
+                                        margin: '4px 0 18px',
+                                    }}
+                                >
+                                    Printer routing, margins &amp; compositing
+                                </h3>
+
+                                <div
+                                    style={{
+                                        display: 'grid',
+                                        gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
+                                        gap: 10,
+                                        marginBottom: 16,
+                                    }}
+                                >
+                                    {(
+                                        [
+                                            ['compositeFrameAndLogos', 'Composite Frame & Logos'],
+                                            ['autoPrintOnResult', 'Auto Print on Result'],
+                                            ['singlePrintPerSession', 'Single Print / Session'],
+                                            ['autoClearPrinterQueue', 'Auto Clear Print Queue'],
+                                        ] as const
+                                    ).map(([key, label]) => (
+                                        <label
+                                            key={key}
+                                            style={{
+                                                display: 'flex',
+                                                alignItems: 'center',
+                                                justifyContent: 'space-between',
+                                                padding: 12,
+                                                background: 'var(--ground)',
+                                                borderRadius: 10,
+                                                cursor: 'pointer',
+                                                fontSize: 12,
+                                                fontWeight: 600,
+                                            }}
+                                        >
+                                            <span>{label}</span>
+                                            <input
+                                                type="checkbox"
+                                                checked={Boolean(
+                                                    settingsForm.operatorSettings[key]
+                                                )}
+                                                onChange={e =>
+                                                    updateOpField(key, e.target.checked)
+                                                }
+                                                style={{
+                                                    accentColor: 'var(--pink)',
+                                                    width: 16,
+                                                    height: 16,
+                                                }}
+                                            />
+                                        </label>
+                                    ))}
+                                </div>
+
+                                <div
+                                    style={{
+                                        display: 'grid',
+                                        gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
+                                        gap: 10,
+                                        marginBottom: 16,
+                                    }}
+                                >
+                                    <div>
+                                        <label
+                                            className="lbl"
+                                            style={{ display: 'block', marginBottom: 6 }}
+                                        >
+                                            Fill color
+                                        </label>
+                                        <select
+                                            className="field"
+                                            value={settingsForm.operatorSettings.printFillColor}
+                                            onChange={e =>
+                                                updateOpField(
+                                                    'printFillColor',
+                                                    e.target.value as 'black' | 'white'
+                                                )
+                                            }
+                                        >
+                                            <option value="black">Black</option>
+                                            <option value="white">White</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label
+                                            className="lbl"
+                                            style={{ display: 'block', marginBottom: 6 }}
+                                        >
+                                            Max copies
+                                        </label>
+                                        <input
+                                            type="number"
+                                            className="field"
+                                            value={settingsForm.operatorSettings.printCopies}
+                                            onChange={e =>
+                                                updateOpField(
+                                                    'printCopies',
+                                                    Number(e.target.value) || 1
+                                                )
+                                            }
+                                        />
+                                    </div>
+                                    <div>
+                                        <label
+                                            className="lbl"
+                                            style={{ display: 'block', marginBottom: 6 }}
+                                        >
+                                            Scale down (%)
+                                        </label>
+                                        <input
+                                            type="number"
+                                            step="0.5"
+                                            className="field"
+                                            value={
+                                                settingsForm.operatorSettings.printScaleDownPercent
+                                            }
+                                            onChange={e =>
+                                                updateOpField(
+                                                    'printScaleDownPercent',
+                                                    Number(e.target.value) || 0
+                                                )
+                                            }
+                                        />
+                                    </div>
+                                    <div>
+                                        <label
+                                            className="lbl"
+                                            style={{ display: 'block', marginBottom: 6 }}
+                                        >
+                                            Primary printer name
+                                        </label>
+                                        <input
+                                            className="field"
+                                            value={
+                                                settingsForm.operatorSettings.selectedPrinterName
+                                            }
+                                            onChange={e =>
+                                                updateOpField('selectedPrinterName', e.target.value)
+                                            }
+                                            placeholder="OS default"
+                                        />
+                                    </div>
+                                </div>
+
+                                <div
+                                    style={{
+                                        display: 'grid',
+                                        gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
+                                        gap: 10,
+                                    }}
+                                >
+                                    <div>
+                                        <label
+                                            className="lbl"
+                                            style={{ display: 'block', marginBottom: 6 }}
+                                        >
+                                            Top pad (px)
+                                        </label>
+                                        <input
+                                            type="number"
+                                            className="field"
+                                            value={settingsForm.operatorSettings.printTopPaddingPx}
+                                            onChange={e =>
+                                                updateOpField(
+                                                    'printTopPaddingPx',
+                                                    Number(e.target.value) || 0
+                                                )
+                                            }
+                                        />
+                                    </div>
+                                    <div>
+                                        <label
+                                            className="lbl"
+                                            style={{ display: 'block', marginBottom: 6 }}
+                                        >
+                                            Bottom pad (px)
+                                        </label>
+                                        <input
+                                            type="number"
+                                            className="field"
+                                            value={
+                                                settingsForm.operatorSettings.printBottomPaddingPx
+                                            }
+                                            onChange={e =>
+                                                updateOpField(
+                                                    'printBottomPaddingPx',
+                                                    Number(e.target.value) || 0
+                                                )
+                                            }
+                                        />
+                                    </div>
+                                    <div>
+                                        <label
+                                            className="lbl"
+                                            style={{ display: 'block', marginBottom: 6 }}
+                                        >
+                                            Left pad (px)
+                                        </label>
+                                        <input
+                                            type="number"
+                                            className="field"
+                                            value={settingsForm.operatorSettings.printLeftPaddingPx}
+                                            onChange={e =>
+                                                updateOpField(
+                                                    'printLeftPaddingPx',
+                                                    Number(e.target.value) || 0
+                                                )
+                                            }
+                                        />
+                                    </div>
+                                    <div>
+                                        <label
+                                            className="lbl"
+                                            style={{ display: 'block', marginBottom: 6 }}
+                                        >
+                                            Right pad (px)
+                                        </label>
+                                        <input
+                                            type="number"
+                                            className="field"
+                                            value={
+                                                settingsForm.operatorSettings.printRightPaddingPx
+                                            }
+                                            onChange={e =>
+                                                updateOpField(
+                                                    'printRightPaddingPx',
+                                                    Number(e.target.value) || 0
+                                                )
+                                            }
+                                        />
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div
+                                style={{
+                                    display: 'grid',
+                                    gridTemplateColumns: '1fr 1fr',
+                                    gap: 20,
+                                }}
+                            >
+                                <div className="card" style={{ padding: 28 }}>
+                                    <span className="lbl">Viewport &amp; timers</span>
+                                    <h3
+                                        style={{
+                                            fontWeight: 700,
+                                            fontSize: 18,
+                                            margin: '4px 0 18px',
+                                        }}
+                                    >
+                                        Camera &amp; screen timers
+                                    </h3>
+                                    <div
+                                        style={{
+                                            display: 'grid',
+                                            gridTemplateColumns: '1fr 1fr',
+                                            gap: 10,
+                                            marginBottom: 12,
+                                        }}
+                                    >
+                                        <div>
+                                            <label
+                                                className="lbl"
+                                                style={{ display: 'block', marginBottom: 6 }}
+                                            >
+                                                Camera rotation
+                                            </label>
+                                            <select
+                                                className="field"
+                                                value={settingsForm.operatorSettings.cameraRotation}
+                                                onChange={e =>
+                                                    updateOpField(
+                                                        'cameraRotation',
+                                                        Number(e.target.value) as
+                                                            | -90
+                                                            | 0
+                                                            | 90
+                                                            | 180
+                                                    )
+                                                }
+                                            >
+                                                <option value={-90}>-90° (Vertical)</option>
+                                                <option value={0}>0° (Landscape)</option>
+                                                <option value={90}>90°</option>
+                                                <option value={180}>180°</option>
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label
+                                                className="lbl"
+                                                style={{ display: 'block', marginBottom: 6 }}
+                                            >
+                                                Countdown (s)
+                                            </label>
+                                            <input
+                                                type="number"
+                                                className="field"
+                                                value={
+                                                    settingsForm.operatorSettings.countdownSeconds
+                                                }
+                                                onChange={e =>
+                                                    updateOpField(
+                                                        'countdownSeconds',
+                                                        Number(e.target.value) || 3
+                                                    )
+                                                }
+                                            />
+                                        </div>
+                                    </div>
+                                    <div
+                                        style={{
+                                            display: 'grid',
+                                            gridTemplateColumns: '1fr 1fr',
+                                            gap: 10,
+                                        }}
+                                    >
+                                        <label
+                                            style={{
+                                                display: 'flex',
+                                                justifyContent: 'space-between',
+                                                padding: 12,
+                                                background: 'var(--ground)',
+                                                borderRadius: 10,
+                                                fontSize: 12,
+                                                fontWeight: 600,
+                                            }}
+                                        >
+                                            <span>Mirror Camera</span>
+                                            <input
+                                                type="checkbox"
+                                                checked={settingsForm.operatorSettings.cameraMirror}
+                                                onChange={e =>
+                                                    updateOpField('cameraMirror', e.target.checked)
+                                                }
+                                                style={{ accentColor: 'var(--pink)' }}
+                                            />
+                                        </label>
+                                        <label
+                                            style={{
+                                                display: 'flex',
+                                                justifyContent: 'space-between',
+                                                padding: 12,
+                                                background: 'var(--ground)',
+                                                borderRadius: 10,
+                                                fontSize: 12,
+                                                fontWeight: 600,
+                                            }}
+                                        >
+                                            <span>Sound Effects</span>
+                                            <input
+                                                type="checkbox"
+                                                checked={settingsForm.operatorSettings.soundEnabled}
+                                                onChange={e =>
+                                                    updateOpField('soundEnabled', e.target.checked)
+                                                }
+                                                style={{ accentColor: 'var(--pink)' }}
+                                            />
+                                        </label>
+                                    </div>
+                                </div>
+
+                                <div className="card" style={{ padding: 28 }}>
+                                    <span className="lbl">Security &amp; uptime</span>
+                                    <h3
+                                        style={{
+                                            fontWeight: 700,
+                                            fontSize: 18,
+                                            margin: '4px 0 18px',
+                                        }}
+                                    >
+                                        Kiosk lock &amp; auto-restart
+                                    </h3>
+                                    <div style={{ marginBottom: 12 }}>
+                                        <label
+                                            className="lbl"
+                                            style={{ display: 'block', marginBottom: 6 }}
+                                        >
+                                            Operator modal password
+                                        </label>
+                                        <input
+                                            type={showSecrets.operatorPassword ? 'text' : 'password'}
+                                            className="field"
+                                            value={settingsForm.operatorSettings.operatorPassword}
+                                            onChange={e =>
+                                                updateOpField('operatorPassword', e.target.value)
+                                            }
+                                        />
+                                    </div>
+                                    <div
+                                        style={{
+                                            display: 'grid',
+                                            gridTemplateColumns: '1fr 1fr',
+                                            gap: 10,
+                                        }}
+                                    >
+                                        <label
+                                            style={{
+                                                display: 'flex',
+                                                justifyContent: 'space-between',
+                                                padding: 12,
+                                                background: 'var(--ground)',
+                                                borderRadius: 10,
+                                                fontSize: 12,
+                                                fontWeight: 600,
+                                            }}
+                                        >
+                                            <span>Kiosk Locked</span>
+                                            <input
+                                                type="checkbox"
+                                                checked={settingsForm.operatorSettings.kioskLocked}
+                                                onChange={e =>
+                                                    updateOpField('kioskLocked', e.target.checked)
+                                                }
+                                                style={{ accentColor: 'var(--pink)' }}
+                                            />
+                                        </label>
+                                        <label
+                                            style={{
+                                                display: 'flex',
+                                                justifyContent: 'space-between',
+                                                padding: 12,
+                                                background: 'var(--ground)',
+                                                borderRadius: 10,
+                                                fontSize: 12,
+                                                fontWeight: 600,
+                                            }}
+                                        >
+                                            <span>Fullscreen on Tap</span>
+                                            <input
+                                                type="checkbox"
+                                                checked={
+                                                    settingsForm.operatorSettings.fullscreenOnTap
+                                                }
+                                                onChange={e =>
+                                                    updateOpField(
+                                                        'fullscreenOnTap',
+                                                        e.target.checked
+                                                    )
+                                                }
+                                                style={{ accentColor: 'var(--pink)' }}
+                                            />
+                                        </label>
+                                    </div>
+                                </div>
+                            </div>
+                        </>
+                    )}
+
+                    {/* Danger Zone */}
+                    <div
+                        className="card"
+                        style={{ padding: 28, borderColor: '#E8C4C9' }}
+                    >
+                        <span className="lbl" style={{ color: '#C6283D' }}>
+                            Danger zone
+                        </span>
+                        <h3 style={{ fontWeight: 700, fontSize: 18, margin: '4px 0 6px' }}>
+                            Finish or delete this project
+                        </h3>
+                        <p
+                            style={{
+                                fontSize: 13,
+                                color: 'var(--muted)',
+                                margin: '0 0 16px',
+                            }}
+                        >
+                            Finishing pauses new portrait generations while keeping the gallery.
+                            Deleting removes the project and its logs forever.
+                        </p>
+                        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                            <button
+                                type="button"
+                                className="btn"
+                                onClick={handleToggleProjectActive}
+                            >
+                                {project.status === 'paused'
+                                    ? 'Reopen project'
+                                    : 'Finish project'}
+                            </button>
+                            <button
+                                type="button"
+                                className="btn btn-danger"
+                                onClick={() => {
+                                    setDeleteConfirmText('');
+                                    setDeleteStep(1);
+                                }}
+                            >
+                                Delete project…
+                            </button>
+                        </div>
+                    </div>
+                </form>
             )}
+
+            {/* ======================== PHOTO DETAILS RIGHT PANEL ======================== */}
+            {mounted &&
+                inspectImage &&
+                createPortal(
+                    <div
+                        className="fadein"
+                        onClick={() => setInspectImage(null)}
+                        style={{
+                            position: 'fixed',
+                            inset: 0,
+                            background: 'rgba(13,13,18,.55)',
+                            backdropFilter: 'blur(4px)',
+                            zIndex: 60,
+                            display: 'flex',
+                            justifyContent: 'flex-end',
+                        }}
+                    >
+                        <aside
+                            className="slidein"
+                            onClick={e => e.stopPropagation()}
+                            style={{
+                                width: 'min(480px, 100vw)',
+                                height: '100%',
+                                background: 'var(--pearl)',
+                                borderLeft: '1px solid var(--hair)',
+                                display: 'flex',
+                                flexDirection: 'column',
+                                overflow: 'hidden',
+                            }}
+                        >
+                            <div
+                                style={{
+                                    padding: '18px 22px',
+                                    borderBottom: '1px solid var(--hair)',
+                                    display: 'flex',
+                                    justifyContent: 'space-between',
+                                    alignItems: 'center',
+                                }}
+                            >
+                                <div>
+                                    <span className="lbl">Photo details</span>
+                                    <div
+                                        style={{
+                                            fontWeight: 700,
+                                            fontSize: 15,
+                                            marginTop: 2,
+                                        }}
+                                    >
+                                        {new Date(inspectImage.created_at).toLocaleString()}
+                                    </div>
+                                </div>
+                                <div style={{ display: 'flex', gap: 6 }}>
+                                    <button
+                                        type="button"
+                                        className="icon-btn"
+                                        title="Previous"
+                                        disabled={inspectIndex <= 0}
+                                        onClick={() => {
+                                            if (inspectIndex > 0) {
+                                                setInspectImage(
+                                                    currentModalImageList[inspectIndex - 1]
+                                                );
+                                            }
+                                        }}
+                                    >
+                                        ◀
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className="icon-btn"
+                                        title="Next"
+                                        disabled={
+                                            inspectIndex < 0 ||
+                                            inspectIndex >= currentModalImageList.length - 1
+                                        }
+                                        onClick={() => {
+                                            if (
+                                                inspectIndex >= 0 &&
+                                                inspectIndex < currentModalImageList.length - 1
+                                            ) {
+                                                setInspectImage(
+                                                    currentModalImageList[inspectIndex + 1]
+                                                );
+                                            }
+                                        }}
+                                    >
+                                        ▶
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className="icon-btn"
+                                        title="Close"
+                                        onClick={() => setInspectImage(null)}
+                                    >
+                                        ✕
+                                    </button>
+                                </div>
+                            </div>
+
+                            <div
+                                style={{
+                                    padding: 22,
+                                    overflowY: 'auto',
+                                    display: 'flex',
+                                    flexDirection: 'column',
+                                    gap: 18,
+                                    flex: 1,
+                                }}
+                            >
+                                <div
+                                    onClick={() => setLightboxImage(inspectImage)}
+                                    style={{
+                                        aspectRatio: '2 / 3',
+                                        maxHeight: 340,
+                                        margin: '0 auto',
+                                        borderRadius: 14,
+                                        overflow: 'hidden',
+                                        border: '1px solid var(--hair)',
+                                        position: 'relative',
+                                        cursor: 'zoom-in',
+                                        background: '#000',
+                                    }}
+                                >
+                                    <img
+                                        src={getFullImageUrl(inspectImage)}
+                                        alt={inspectImage.public_id}
+                                        style={{
+                                            width: '100%',
+                                            height: '100%',
+                                            objectFit: 'contain',
+                                        }}
+                                    />
+                                </div>
+
+                                <div style={{ display: 'flex', gap: 8 }}>
+                                    <button
+                                        type="button"
+                                        className={`btn ${
+                                            inspectImage.tags?.includes('Featured')
+                                                ? ''
+                                                : 'btn-pink'
+                                        }`}
+                                        style={{ flex: 1, justifyContent: 'center' }}
+                                        onClick={() => handleToggleTag(inspectImage)}
+                                    >
+                                        ★{' '}
+                                        {inspectImage.tags?.includes('Featured')
+                                            ? 'Remove from Featured'
+                                            : 'Add to Featured'}
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className="btn"
+                                        style={{ flex: 1, justifyContent: 'center' }}
+                                        onClick={() => handleDownloadSingleImage(inspectImage)}
+                                    >
+                                        ⤓ Download
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className="btn btn-danger"
+                                        title="Delete from Cloudinary"
+                                        aria-label="Delete portrait from Cloudinary"
+                                        onClick={() => setDeleteImageTargets([inspectImage])}
+                                    >
+                                        <Trash2 size={15} />
+                                    </button>
+                                </div>
+
+                                <div
+                                    style={{
+                                        display: 'grid',
+                                        gridTemplateColumns: '1fr 1fr',
+                                        gap: 10,
+                                        background: 'var(--ground)',
+                                        padding: 14,
+                                        borderRadius: 12,
+                                    }}
+                                >
+                                    <div>
+                                        <span className="lbl">Dimensions</span>
+                                        <div
+                                            style={{
+                                                fontWeight: 600,
+                                                fontSize: 13,
+                                                marginTop: 2,
+                                            }}
+                                        >
+                                            {inspectImage.width} × {inspectImage.height} (
+                                            {inspectImage.format.toUpperCase()})
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <span className="lbl">AI model</span>
+                                        <div
+                                            style={{
+                                                fontWeight: 600,
+                                                fontSize: 13,
+                                                marginTop: 2,
+                                            }}
+                                        >
+                                            {project.selectedAiModel || 'gpt-image-1.5'}
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {processedDetails.length > 0 && (
+                                    <div
+                                        style={{
+                                            display: 'flex',
+                                            flexDirection: 'column',
+                                            gap: 12,
+                                        }}
+                                    >
+                                        {processedDetails.map((item, idx) => (
+                                            <div key={idx}>
+                                                <span
+                                                    className="lbl"
+                                                    style={{
+                                                        display: 'block',
+                                                        marginBottom: 6,
+                                                    }}
+                                                >
+                                                    {item.label}
+                                                </span>
+                                                <div
+                                                    style={{
+                                                        padding: 12,
+                                                        borderRadius: 10,
+                                                        background: 'var(--ground)',
+                                                        fontSize: 12,
+                                                        lineHeight: 1.55,
+                                                        whiteSpace: 'pre-wrap',
+                                                    }}
+                                                >
+                                                    {item.value}
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        </aside>
+                    </div>,
+                    document.body
+                )}
+
+            {/* ======================== FULL VIEW LIGHTBOX ======================== */}
+            {mounted &&
+                lightboxImage &&
+                createPortal(
+                    <div
+                        className="fadein"
+                        onClick={() => setLightboxImage(null)}
+                        style={{
+                            position: 'fixed',
+                            inset: 0,
+                            background: 'rgba(5,5,7,.94)',
+                            backdropFilter: 'blur(8px)',
+                            zIndex: 70,
+                            display: 'flex',
+                            flexDirection: 'column',
+                            color: '#fff',
+                        }}
+                    >
+                        <div
+                            onClick={e => e.stopPropagation()}
+                            style={{
+                                padding: '16px 24px',
+                                display: 'flex',
+                                justifyContent: 'space-between',
+                                alignItems: 'center',
+                                borderBottom: '1px solid rgba(255,255,255,.08)',
+                                flexWrap: 'wrap',
+                                gap: 12,
+                            }}
+                        >
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                                <span style={{ fontWeight: 700, fontSize: 14 }}>
+                                    {new Date(lightboxImage.created_at).toLocaleString()}
+                                </span>
+                                <span style={{ color: 'rgba(255,255,255,.4)' }}>·</span>
+                                <span style={{ fontSize: 12, color: 'rgba(255,255,255,.65)' }}>
+                                    Portrait {lightboxIndex + 1} of {currentModalImageList.length} ·{' '}
+                                    {lightboxImage.width} × {lightboxImage.height}{' '}
+                                    {lightboxImage.format.toUpperCase()}
+                                </span>
+                            </div>
+
+                            <div style={{ display: 'flex', gap: 8 }}>
+                                <button
+                                    type="button"
+                                    className="lb-btn"
+                                    onClick={() => handleToggleTag(lightboxImage)}
+                                    style={{
+                                        background: lightboxImage.tags?.includes('Featured')
+                                            ? 'var(--pink)'
+                                            : undefined,
+                                        borderColor: lightboxImage.tags?.includes('Featured')
+                                            ? 'var(--pink)'
+                                            : undefined,
+                                    }}
+                                >
+                                    ★{' '}
+                                    {lightboxImage.tags?.includes('Featured')
+                                        ? 'Featured'
+                                        : 'Feature'}
+                                </button>
+                                <button
+                                    type="button"
+                                    className="lb-btn"
+                                    onClick={() => handleDownloadSingleImage(lightboxImage)}
+                                >
+                                    ⤓ Download
+                                </button>
+                                <button
+                                    type="button"
+                                    className="lb-btn"
+                                    onClick={() => {
+                                        const target = lightboxImage;
+                                        setLightboxImage(null);
+                                        setInspectImage(target);
+                                    }}
+                                >
+                                    ⓘ Details
+                                </button>
+                                <button
+                                    type="button"
+                                    className="lb-btn"
+                                    title="Delete from Cloudinary"
+                                    onClick={() => setDeleteImageTargets([lightboxImage])}
+                                    style={{
+                                        borderColor: 'rgba(255,77,109,.45)',
+                                        color: '#FF7088',
+                                    }}
+                                >
+                                    <Trash2 size={14} /> Delete
+                                </button>
+                                <button
+                                    type="button"
+                                    className="lb-btn"
+                                    onClick={() => setLightboxImage(null)}
+                                >
+                                    ✕
+                                </button>
+                            </div>
+                        </div>
+
+                        <div
+                            style={{
+                                flex: 1,
+                                display: 'grid',
+                                gridTemplateColumns: '64px 1fr 64px',
+                                alignItems: 'center',
+                                padding: '20px 12px',
+                                minHeight: 0,
+                            }}
+                        >
+                            <div style={{ display: 'flex', justifyContent: 'center' }}>
+                                {lightboxIndex > 0 && (
+                                    <button
+                                        type="button"
+                                        className="lb-btn"
+                                        onClick={e => {
+                                            e.stopPropagation();
+                                            setLightboxImage(
+                                                currentModalImageList[lightboxIndex - 1]
+                                            );
+                                        }}
+                                    >
+                                        ◀
+                                    </button>
+                                )}
+                            </div>
+
+                            <div
+                                onClick={e => e.stopPropagation()}
+                                style={{
+                                    height: '100%',
+                                    display: 'grid',
+                                    placeItems: 'center',
+                                    minHeight: 0,
+                                }}
+                            >
+                                <img
+                                    src={getFullImageUrl(lightboxImage)}
+                                    alt={lightboxImage.public_id}
+                                    className="zoomin"
+                                    style={{
+                                        maxHeight: 'calc(100vh - 130px)',
+                                        maxWidth: '100%',
+                                        objectFit: 'contain',
+                                        borderRadius: 14,
+                                        boxShadow: '0 30px 90px rgba(0,0,0,.6)',
+                                    }}
+                                />
+                            </div>
+
+                            <div style={{ display: 'flex', justifyContent: 'center' }}>
+                                {lightboxIndex >= 0 &&
+                                    lightboxIndex < currentModalImageList.length - 1 && (
+                                        <button
+                                            type="button"
+                                            className="lb-btn"
+                                            onClick={e => {
+                                                e.stopPropagation();
+                                                setLightboxImage(
+                                                    currentModalImageList[lightboxIndex + 1]
+                                                );
+                                            }}
+                                        >
+                                            ▶
+                                        </button>
+                                    )}
+                            </div>
+                        </div>
+                    </div>,
+                    document.body
+                )}
+
+            {/* ======================== QR CODE MODAL ======================== */}
+            {mounted &&
+                qrModalImage &&
+                createPortal(
+                    <div
+                        className="fadein"
+                        onClick={() => setQrModalImage(null)}
+                        style={{
+                            position: 'fixed',
+                            inset: 0,
+                            background: 'rgba(13,13,18,.6)',
+                            backdropFilter: 'blur(4px)',
+                            zIndex: 80,
+                            display: 'grid',
+                            placeItems: 'center',
+                            padding: 20,
+                        }}
+                    >
+                        <div
+                            className="card zoomin"
+                            onClick={e => e.stopPropagation()}
+                            style={{
+                                width: 'min(380px, 100%)',
+                                padding: 26,
+                                textAlign: 'center',
+                            }}
+                        >
+                            <span className="lbl" style={{ color: 'var(--pink)' }}>
+                                Guest share link
+                            </span>
+                            <h3 style={{ fontWeight: 800, fontSize: 18, margin: '4px 0 16px' }}>
+                                Scan to download portrait
+                            </h3>
+                            <div
+                                style={{
+                                    background: '#fff',
+                                    padding: 16,
+                                    borderRadius: 14,
+                                    border: '1px solid var(--hair)',
+                                    display: 'inline-block',
+                                }}
+                            >
+                                <img
+                                    src={`https://api.qrserver.com/v1/create-qr-code/?size=240x240&margin=8&data=${encodeURIComponent(
+                                        getFullImageUrl(qrModalImage)
+                                    )}`}
+                                    alt="QR Code"
+                                    width={220}
+                                    height={220}
+                                />
+                            </div>
+                            <div
+                                style={{
+                                    display: 'flex',
+                                    gap: 8,
+                                    justifyContent: 'center',
+                                    marginTop: 18,
+                                }}
+                            >
+                                <button
+                                    type="button"
+                                    className="btn"
+                                    onClick={() => setQrModalImage(null)}
+                                >
+                                    Close
+                                </button>
+                                <button
+                                    type="button"
+                                    className="btn btn-pink"
+                                    onClick={() => handleDownloadSingleImage(qrModalImage)}
+                                >
+                                    ⤓ Download image
+                                </button>
+                            </div>
+                        </div>
+                    </div>,
+                    document.body
+                )}
+
+            {/* ======================== 2-STEP DELETE PROJECT DIALOG ======================== */}
+            {mounted &&
+                deleteStep > 0 &&
+                createPortal(
+                    <div
+                        className="fadein"
+                        onClick={() => setDeleteStep(0)}
+                        style={{
+                            position: 'fixed',
+                            inset: 0,
+                            background: 'rgba(13,13,18,.6)',
+                            backdropFilter: 'blur(4px)',
+                            zIndex: 85,
+                            display: 'grid',
+                            placeItems: 'center',
+                            padding: 20,
+                        }}
+                    >
+                        <div
+                            className="card zoomin"
+                            onClick={e => e.stopPropagation()}
+                            style={{ width: 'min(440px, 100%)', padding: 26 }}
+                        >
+                            <span className="lbl" style={{ color: '#C6283D' }}>
+                                Delete project · Step {deleteStep} of 2
+                            </span>
+                            {deleteStep === 1 ? (
+                                <>
+                                    <h3
+                                        style={{
+                                            fontWeight: 800,
+                                            fontSize: 20,
+                                            margin: '6px 0 8px',
+                                        }}
+                                    >
+                                        Delete {project.name}?
+                                    </h3>
+                                    <p
+                                        style={{
+                                            fontSize: 13,
+                                            color: 'var(--muted)',
+                                            lineHeight: 1.55,
+                                            margin: '0 0 20px',
+                                        }}
+                                    >
+                                        This removes the project, its usage counters, and team
+                                        assignments from the dashboard.
+                                    </p>
+                                    <div
+                                        style={{
+                                            display: 'flex',
+                                            justifyContent: 'flex-end',
+                                            gap: 8,
+                                        }}
+                                    >
+                                        <button
+                                            type="button"
+                                            className="btn"
+                                            onClick={() => setDeleteStep(0)}
+                                        >
+                                            Cancel
+                                        </button>
+                                        <button
+                                            type="button"
+                                            className="btn btn-danger"
+                                            onClick={() => setDeleteStep(2)}
+                                        >
+                                            Continue →
+                                        </button>
+                                    </div>
+                                </>
+                            ) : (
+                                <>
+                                    <h3
+                                        style={{
+                                            fontWeight: 800,
+                                            fontSize: 20,
+                                            margin: '6px 0 8px',
+                                        }}
+                                    >
+                                        Type project name to confirm
+                                    </h3>
+                                    <p
+                                        style={{
+                                            fontSize: 13,
+                                            color: 'var(--muted)',
+                                            lineHeight: 1.55,
+                                            margin: '0 0 12px',
+                                        }}
+                                    >
+                                        Type <b style={{ color: 'var(--ink)' }}>{project.name}</b>{' '}
+                                        below to permanently delete this project.
+                                    </p>
+                                    <input
+                                        className="field"
+                                        placeholder={project.name}
+                                        value={deleteConfirmText}
+                                        onChange={e => setDeleteConfirmText(e.target.value)}
+                                        style={{ marginBottom: 18 }}
+                                    />
+                                    <div
+                                        style={{
+                                            display: 'flex',
+                                            justifyContent: 'flex-end',
+                                            gap: 8,
+                                        }}
+                                    >
+                                        <button
+                                            type="button"
+                                            className="btn"
+                                            onClick={() => setDeleteStep(0)}
+                                        >
+                                            Cancel
+                                        </button>
+                                        <button
+                                            type="button"
+                                            className="btn btn-danger"
+                                            disabled={
+                                                deleteConfirmText.trim() !== project.name.trim() ||
+                                                isDeleting
+                                            }
+                                            onClick={handleDeleteProject}
+                                        >
+                                            {isDeleting ? 'Deleting…' : 'Delete forever'}
+                                        </button>
+                                    </div>
+                                </>
+                            )}
+                        </div>
+                    </div>,
+                    document.body
+                )}
+
+            {/* ======================== DELETE PORTRAIT(S) DIALOG ======================== */}
+            {mounted &&
+                deleteImageTargets.length > 0 &&
+                createPortal(
+                    <div
+                        className="fadein"
+                        onClick={() => !isDeletingImages && setDeleteImageTargets([])}
+                        style={{
+                            position: 'fixed',
+                            inset: 0,
+                            background: 'rgba(13,13,18,.6)',
+                            backdropFilter: 'blur(4px)',
+                            zIndex: 88,
+                            display: 'grid',
+                            placeItems: 'center',
+                            padding: 20,
+                        }}
+                    >
+                        <div
+                            className="card zoomin"
+                            onClick={e => e.stopPropagation()}
+                            style={{ width: 'min(420px, 100%)', padding: 26, gap: 14 }}
+                        >
+                            <span className="lbl" style={{ color: '#C6283D' }}>
+                                Cloudinary · Permanent deletion
+                            </span>
+                            <h3 style={{ fontWeight: 800, fontSize: 20, margin: 0 }}>
+                                {deleteImageTargets.length === 1
+                                    ? 'Delete this portrait?'
+                                    : `Delete ${deleteImageTargets.length} portraits?`}
+                            </h3>
+
+                            {deleteImageTargets.length === 1 && (
+                                <div
+                                    style={{
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        gap: 12,
+                                        padding: 10,
+                                        borderRadius: 4,
+                                        background: '#EEEBE5',
+                                        border: '1px solid #E3DFD8',
+                                    }}
+                                >
+                                    <img
+                                        src={getThumbImageUrl(deleteImageTargets[0])}
+                                        alt={deleteImageTargets[0].public_id}
+                                        style={{
+                                            width: 48,
+                                            height: 72,
+                                            objectFit: 'cover',
+                                            borderRadius: 4,
+                                            flex: 'none',
+                                        }}
+                                    />
+                                    <div style={{ minWidth: 0 }}>
+                                        <div
+                                            style={{
+                                                fontWeight: 700,
+                                                fontSize: 13,
+                                                overflow: 'hidden',
+                                                textOverflow: 'ellipsis',
+                                                whiteSpace: 'nowrap',
+                                            }}
+                                        >
+                                            {new Date(
+                                                deleteImageTargets[0].created_at
+                                            ).toLocaleString()}
+                                        </div>
+                                        <div
+                                            className="mono"
+                                            style={{
+                                                fontSize: 11,
+                                                color: '#5C5C66',
+                                                overflow: 'hidden',
+                                                textOverflow: 'ellipsis',
+                                                whiteSpace: 'nowrap',
+                                                marginTop: 2,
+                                            }}
+                                        >
+                                            {deleteImageTargets[0].public_id}
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+
+                            <p
+                                style={{
+                                    fontSize: 13,
+                                    color: '#5C5C66',
+                                    lineHeight: 1.55,
+                                    margin: 0,
+                                }}
+                            >
+                                {deleteImageTargets.length === 1
+                                    ? 'This permanently deletes the image from Cloudinary and invalidates its CDN link. This action cannot be undone.'
+                                    : `This permanently deletes all ${deleteImageTargets.length} selected images from Cloudinary and invalidates their CDN links. This action cannot be undone.`}
+                            </p>
+
+                            <div
+                                style={{
+                                    display: 'flex',
+                                    justifyContent: 'flex-end',
+                                    gap: 8,
+                                    marginTop: 4,
+                                }}
+                            >
+                                <button
+                                    type="button"
+                                    className="btn"
+                                    disabled={isDeletingImages}
+                                    onClick={() => setDeleteImageTargets([])}
+                                >
+                                    Cancel
+                                </button>
+                                <button
+                                    type="button"
+                                    className="btn btn-danger"
+                                    disabled={isDeletingImages}
+                                    onClick={handleConfirmDeleteImages}
+                                >
+                                    <Trash2 size={14} />
+                                    {isDeletingImages
+                                        ? 'Deleting…'
+                                        : deleteImageTargets.length === 1
+                                          ? 'Delete portrait'
+                                          : `Delete ${deleteImageTargets.length} portraits`}
+                                </button>
+                            </div>
+                        </div>
+                    </div>,
+                    document.body
+                )}
+
+            {/* ======================== TOAST ======================== */}
+            {mounted &&
+                toastState &&
+                createPortal(
+                    <div
+                        className="toastin"
+                        style={{
+                            position: 'fixed',
+                            bottom: 24,
+                            left: '50%',
+                            transform: 'translateX(-50%)',
+                            background: 'var(--void)',
+                            color: '#fff',
+                            padding: '10px 16px',
+                            borderRadius: 99,
+                            fontSize: 13,
+                            fontWeight: 600,
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: 12,
+                            boxShadow: '0 18px 40px rgba(0,0,0,.35)',
+                            zIndex: 90,
+                        }}
+                    >
+                        <span>{toastState.message}</span>
+                        {toastState.img && (
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    const target = toastState.img;
+                                    if (!target) return;
+                                    setToastState(null);
+                                    handleToggleTag(target, false);
+                                }}
+                                style={{
+                                    background: 'transparent',
+                                    border: 0,
+                                    color: 'var(--pink)',
+                                    fontWeight: 800,
+                                    fontSize: 12,
+                                    cursor: 'pointer',
+                                    letterSpacing: '.06em',
+                                    textTransform: 'uppercase',
+                                }}
+                            >
+                                UNDO
+                            </button>
+                        )}
+                    </div>,
+                    document.body
+                )}
         </>
     );
 }

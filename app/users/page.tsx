@@ -1,347 +1,1237 @@
-
 'use client';
 
-import React, { useState, useEffect } from 'react';
-import { User, UserRole } from '@/types';
-import { Plus, Mail, Shield, User as UserIcon, MoreHorizontal, Trash2, Loader2, AlertCircle } from 'lucide-react';
+import React, { useState, useEffect, useMemo } from 'react';
+import { UserRole, Project } from '@/types';
 import { useAuth } from '@/components/AuthContext';
 import { supabase } from '@/utils/supabase';
+import { useRouter } from 'next/navigation';
 
-interface WhitelistUser {
+type PeopleFilter = 'all' | 'admin' | 'regular' | 'invited';
+
+interface UnifiedPerson {
+    key: string;
+    profileId?: string;
+    name: string;
     email: string;
-    role: string;
-    created_at: string;
+    role: UserRole;
+    status: 'active' | 'invited';
+    lastSignIn: string;
+    isMe: boolean;
+    isExternal: boolean;
+    warning: string;
+    avatarBg: string;
+    avatarColor: string;
+    initials: string;
+}
+
+const AVATAR_PALETTE = [
+    { bg: '#FFE8F1', color: '#B8004A' },
+    { bg: '#EFE3EC', color: '#4B1D3F' },
+    { bg: '#F3E9DC', color: '#7A5A2E' },
+    { bg: '#E3F9EF', color: '#0B7A4B' },
+];
+
+function getInitials(name: string): string {
+    if (!name) return 'U';
+    const parts = name.trim().split(/[\s._-]+/);
+    if (parts.length >= 2 && parts[0] && parts[1]) {
+        return (parts[0][0] + parts[1][0]).toUpperCase();
+    }
+    return name.slice(0, 2).toUpperCase();
+}
+
+function formatShortDate(dateStr?: string): string {
+    if (!dateStr) return '—';
+    const d = new Date(dateStr);
+    if (isNaN(d.getTime())) return '—';
+    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
 
 export default function UserManagementPage() {
     const { user: currentUser } = useAuth();
-    const [profiles, setProfiles] = useState<User[]>([]);
-    const [whitelist, setWhitelist] = useState<WhitelistUser[]>([]);
+    const router = useRouter();
+
+    const [profiles, setProfiles] = useState<
+        { id: string; full_name: string; email: string; role: string; updated_at?: string; created_at?: string }[]
+    >([]);
+    const [whitelist, setWhitelist] = useState<
+        { email: string; role: string; created_at: string }[]
+    >([]);
+    const [projects, setProjects] = useState<Project[]>([]);
     const [loading, setLoading] = useState(true);
-    const [showModal, setShowModal] = useState(false);
-    const [newUser, setNewUser] = useState({
-        email: '',
-        role: UserRole.REGULAR
-    });
-    const [error, setError] = useState('');
+
+    const [filter, setFilter] = useState<PeopleFilter>('all');
+    const [toast, setToast] = useState('');
+
+    // Remove confirmation dialog state
+    const [removeTarget, setRemoveTarget] = useState<UnifiedPerson | null>(null);
+    const [isRemoving, setIsRemoving] = useState(false);
+
+    // Invite dialog state
+    const [inviting, setInviting] = useState(false);
+    const [invEmail, setInvEmail] = useState('');
+    const [invRole, setInvRole] = useState<UserRole>(UserRole.REGULAR);
+    const [selectedProjectIds, setSelectedProjectIds] = useState<string[]>([]);
+    const [projectPickerOpen, setProjectPickerOpen] = useState(false);
+    const [projectSearch, setProjectSearch] = useState('');
+    const [isSendingInvite, setIsSendingInvite] = useState(false);
+
+    const showToast = (msg: string) => {
+        setToast(msg);
+        setTimeout(() => {
+            setToast(prev => (prev === msg ? '' : prev));
+        }, 3000);
+    };
 
     useEffect(() => {
+        if (currentUser && currentUser.role !== UserRole.ADMIN) {
+            router.replace('/');
+            return;
+        }
         if (currentUser?.role === UserRole.ADMIN) {
             fetchData();
         }
-    }, [currentUser]);
+    }, [currentUser, router]);
 
     const fetchData = async () => {
         setLoading(true);
         try {
-            // Fetch profiles (logged in users)
-            const { data: profileData, error: pError } = await supabase
-                .from('profiles')
-                .select('*')
-                .order('full_name', { ascending: true });
+            const [{ data: profileData }, { data: whitelistData }, { data: projectsData }] =
+                await Promise.all([
+                    supabase.from('profiles').select('*').order('full_name', { ascending: true }),
+                    supabase
+                        .from('allowed_users')
+                        .select('*')
+                        .order('created_at', { ascending: false }),
+                    supabase.from('projects').select('*').order('created_at', { ascending: false }),
+                ]);
 
-            if (pError) throw pError;
-
-            // Fetch whitelist (authorized emails)
-            const { data: whitelistData, error: wError } = await supabase
-                .from('allowed_users')
-                .select('*')
-                .order('created_at', { ascending: false });
-
-            if (wError) throw wError;
-
-            setProfiles(profileData.map(p => ({
-                id: p.id,
-                name: p.full_name || 'New User',
-                email: p.email,
-                role: p.role as UserRole,
-                avatarUrl: p.avatar_url,
-                assignedProjectIds: []
-            })));
-
-            setWhitelist(whitelistData);
+            setProfiles(profileData || []);
+            setWhitelist(whitelistData || []);
+            setProjects(
+                (projectsData || []).map(p => ({
+                    id: p.id,
+                    name: p.name,
+                    description: p.description || '',
+                    dailyLimit: p.max_usage || 1000,
+                    currentGenerations: p.total_usage || 0,
+                    createdAt: p.created_at || '',
+                    ownerId: p.created_by || '',
+                    is_active: p.is_active !== false,
+                    status: p.is_active === false ? 'paused' : 'active',
+                }))
+            );
         } catch (err) {
-            console.error('Error fetching dashboard data:', err);
+            console.error('Error fetching people & access:', err);
         } finally {
             setLoading(false);
         }
     };
 
-    const handleGrantAccess = async (e: React.FormEvent) => {
-        e.preventDefault();
-        setError('');
+    // Build unified people list
+    const unifiedPeople = useMemo<UnifiedPerson[]>(() => {
+        const map = new Map<
+            string,
+            {
+                profile?: (typeof profiles)[0];
+                whitelist?: (typeof whitelist)[0];
+            }
+        >();
+
+        for (const p of profiles) {
+            if (!p.email) continue;
+            map.set(p.email.toLowerCase(), { profile: p });
+        }
+        for (const w of whitelist) {
+            if (!w.email) continue;
+            const key = w.email.toLowerCase();
+            const existing = map.get(key) || {};
+            map.set(key, { ...existing, whitelist: w });
+        }
+
+        const list: UnifiedPerson[] = [];
+        let idx = 0;
+
+        Array.from(map.entries())
+            .sort((a, b) => {
+                const nameA =
+                    a[1].profile?.full_name || a[0].split('@')[0];
+                const nameB =
+                    b[1].profile?.full_name || b[0].split('@')[0];
+                return nameA.localeCompare(nameB);
+            })
+            .forEach(([emailKey, entry]) => {
+                const prof = entry.profile;
+                const wl = entry.whitelist;
+                const roleStr = (wl?.role || prof?.role || 'REGULAR').toUpperCase();
+                const role = roleStr === 'ADMIN' ? UserRole.ADMIN : UserRole.REGULAR;
+                const isSignedIn = Boolean(prof);
+                const name = prof?.full_name || emailKey.split('@')[0];
+                const isMe = currentUser?.email?.toLowerCase() === emailKey;
+                const isExternal = !emailKey.endsWith('@5d-vr.com');
+                const warning =
+                    isExternal && role === UserRole.ADMIN
+                        ? 'Admin on a personal / external email account'
+                        : '';
+
+                const palette = isSignedIn
+                    ? AVATAR_PALETTE[idx % AVATAR_PALETTE.length]
+                    : { bg: '#E3DFD8', color: '#5C5C66' };
+                idx++;
+
+                list.push({
+                    key: emailKey,
+                    profileId: prof?.id,
+                    name,
+                    email: prof?.email || wl?.email || emailKey,
+                    role,
+                    status: isSignedIn ? 'active' : 'invited',
+                    lastSignIn: isMe
+                        ? 'Now'
+                        : isSignedIn
+                          ? formatShortDate(prof?.updated_at || prof?.created_at)
+                          : '—',
+                    isMe,
+                    isExternal,
+                    warning,
+                    avatarBg: palette.bg,
+                    avatarColor: palette.color,
+                    initials: getInitials(name),
+                });
+            });
+
+        return list;
+    }, [profiles, whitelist, currentUser]);
+
+    const counts = useMemo(() => {
+        return {
+            all: unifiedPeople.length,
+            admin: unifiedPeople.filter(p => p.role === UserRole.ADMIN).length,
+            regular: unifiedPeople.filter(p => p.role === UserRole.REGULAR).length,
+            invited: unifiedPeople.filter(p => p.status === 'invited').length,
+        };
+    }, [unifiedPeople]);
+
+    const filteredPeople = useMemo(() => {
+        return unifiedPeople.filter(p => {
+            if (filter === 'admin') return p.role === UserRole.ADMIN;
+            if (filter === 'regular') return p.role === UserRole.REGULAR;
+            if (filter === 'invited') return p.status === 'invited';
+            return true;
+        });
+    }, [unifiedPeople, filter]);
+
+    const handleRoleChange = async (person: UnifiedPerson, nextRole: UserRole) => {
+        if (person.isMe) return;
+        try {
+            // Upsert in allowed_users
+            await supabase
+                .from('allowed_users')
+                .upsert([{ email: person.email.toLowerCase(), role: nextRole }], {
+                    onConflict: 'email',
+                });
+
+            // Update profile if exists
+            if (person.profileId) {
+                await supabase
+                    .from('profiles')
+                    .update({ role: nextRole })
+                    .eq('id', person.profileId);
+            }
+
+            showToast(
+                `${person.name} is now ${nextRole === UserRole.ADMIN ? 'an Admin' : 'a Regular user'}`
+            );
+            await fetchData();
+        } catch (err) {
+            console.error('Error updating role:', err);
+            showToast('Could not update role');
+        }
+    };
+
+    const handleConfirmRemove = async () => {
+        if (!removeTarget) return;
+        setIsRemoving(true);
+        try {
+            const target = removeTarget;
+            await supabase
+                .from('allowed_users')
+                .delete()
+                .ilike('email', target.email);
+
+            if (target.profileId) {
+                await supabase
+                    .from('projects')
+                    .update({ created_by: null })
+                    .eq('created_by', target.profileId);
+
+                await supabase.from('profiles').delete().eq('id', target.profileId);
+            }
+
+            setRemoveTarget(null);
+            showToast(`${target.name} no longer has access`);
+            await fetchData();
+        } catch (err) {
+            console.error('Error removing user:', err);
+            showToast('Failed to remove access');
+        } finally {
+            setIsRemoving(false);
+        }
+    };
+
+    const isInvEmailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(invEmail.trim());
+    const isInvExternal =
+        isInvEmailValid && !invEmail.trim().toLowerCase().endsWith('@5d-vr.com');
+    const isInviteValid =
+        isInvEmailValid &&
+        (invRole === UserRole.ADMIN || selectedProjectIds.length > 0);
+
+    const handleSendInvite = async () => {
+        if (!isInviteValid) return;
+        setIsSendingInvite(true);
+        const cleanEmail = invEmail.trim().toLowerCase();
 
         try {
             const { error: insertError } = await supabase
                 .from('allowed_users')
-                .insert([{
-                    email: newUser.email.toLowerCase().trim(),
-                    role: newUser.role
-                }]);
+                .upsert([{ email: cleanEmail, role: invRole }], { onConflict: 'email' });
 
-            if (insertError) {
-                if (insertError.code === '23505') {
-                    setError('This email is already whitelisted.');
-                } else {
-                    throw insertError;
-                }
-                return;
-            }
+            if (insertError) throw insertError;
 
-            setShowModal(false);
-            setNewUser({ email: '', role: UserRole.REGULAR });
-            fetchData();
-        } catch (err) {
-            console.error('Error whitelisting user:', err);
-            setError('Failed to grant access. Please try again.');
-        }
-    };
-
-    const handleDeleteUser = async (email: string, profileId?: string) => {
-        const confirmMsg = profileId
-            ? `Are you sure? This will delete ${email}'s profile and revoke their login access. Projects they created will become ownerless.`
-            : `Are you sure you want to revoke access for ${email}?`;
-
-        if (!confirm(confirmMsg)) return;
-
-        setLoading(true);
-        try {
-            // 1. Remove from Whitelist
-            const { error: wError } = await supabase
-                .from('allowed_users')
-                .delete()
-                .eq('email', email);
-            if (wError) throw wError;
-
-            // 2. If they have a profile, clean up
-            if (profileId) {
-                // Set projects to NULL owner instead of deleting them
-                const { error: pUpdateError } = await supabase
-                    .from('projects')
-                    .update({ created_by: null })
-                    .eq('created_by', profileId);
-
-                if (pUpdateError) console.warn('Could not detach projects:', pUpdateError);
-
-                // Delete the profile
-                const { error: pDeleteError } = await supabase
+            // If user already has a profile, update role and assign selected projects
+            const existingProfile = profiles.find(
+                p => p.email?.toLowerCase() === cleanEmail
+            );
+            if (existingProfile) {
+                await supabase
                     .from('profiles')
-                    .delete()
-                    .eq('id', profileId);
+                    .update({ role: invRole })
+                    .eq('id', existingProfile.id);
 
-                if (pDeleteError) throw pDeleteError;
+                if (invRole === UserRole.REGULAR && selectedProjectIds.length > 0) {
+                    const rows = selectedProjectIds.map(pid => ({
+                        project_id: pid,
+                        user_id: existingProfile.id,
+                    }));
+                    await supabase
+                        .from('project_members')
+                        .upsert(rows, { onConflict: 'project_id,user_id' });
+                }
             }
 
-            fetchData();
-        } catch (err: any) {
-            console.error('Error deleting user:', err);
-            alert(`Failed to delete user: ${err.message}`);
+            const summary =
+                invRole === UserRole.ADMIN
+                    ? `Invite sent to ${cleanEmail} as Admin`
+                    : `Invite sent to ${cleanEmail} · ${selectedProjectIds.length} project${
+                          selectedProjectIds.length === 1 ? '' : 's'
+                      }`;
+
+            setInviting(false);
+            setInvEmail('');
+            setInvRole(UserRole.REGULAR);
+            setSelectedProjectIds([]);
+            setProjectPickerOpen(false);
+            showToast(summary);
+            await fetchData();
+        } catch (err) {
+            console.error('Error inviting person:', err);
+            showToast('Failed to send invite');
         } finally {
-            setLoading(false);
+            setIsSendingInvite(false);
         }
     };
 
-    if (currentUser?.role !== UserRole.ADMIN) {
-        return (
-            <div className="flex flex-col items-center justify-center py-20">
-                <Shield size={48} className="text-slate-300 mb-4" />
-                <h2 className="text-xl font-bold text-slate-800">Access Denied</h2>
-                <p className="text-slate-500">You don't have permission to access user management.</p>
-            </div>
-        );
-    }
+    const matchingProjectsForPicker = useMemo(() => {
+        const q = projectSearch.trim().toLowerCase();
+        if (!q) return projects;
+        return projects.filter(p => p.name.toLowerCase().includes(q));
+    }, [projects, projectSearch]);
+
+    if (!currentUser || currentUser.role !== UserRole.ADMIN) return null;
+
+    const filterChips: {
+        id: PeopleFilter;
+        label: string;
+        count: number;
+        dot: string;
+        activeBg: string;
+        activeBorder: string;
+        activeColor: string;
+    }[] = [
+        {
+            id: 'all',
+            label: 'Everyone',
+            count: counts.all,
+            dot: '#FF0066',
+            activeBg: '#FFE8F1',
+            activeBorder: '#FF0066',
+            activeColor: '#B8004A',
+        },
+        {
+            id: 'admin',
+            label: 'Admins',
+            count: counts.admin,
+            dot: '#4B1D3F',
+            activeBg: '#EFE3EC',
+            activeBorder: '#4B1D3F',
+            activeColor: '#4B1D3F',
+        },
+        {
+            id: 'regular',
+            label: 'Regular',
+            count: counts.regular,
+            dot: '#5C5C66',
+            activeBg: '#E3DFD8',
+            activeBorder: '#3A3A42',
+            activeColor: '#3A3A42',
+        },
+        {
+            id: 'invited',
+            label: 'Invited',
+            count: counts.invited,
+            dot: '#C9A46B',
+            activeBg: '#F3E9DC',
+            activeBorder: '#7A5A2E',
+            activeColor: '#7A5A2E',
+        },
+    ];
+
+    const pjSummary =
+        selectedProjectIds.length === 0
+            ? 'Choose one or more projects'
+            : selectedProjectIds.length === 1
+              ? projects.find(p => p.id === selectedProjectIds[0])?.name || '1 project selected'
+              : `${selectedProjectIds.length} projects selected`;
 
     return (
-        <div className="space-y-8 animate-in fade-in duration-500">
-            <div className="flex items-center justify-between">
-                <div>
-                    <h2 className="text-2xl font-bold text-slate-800 tracking-tight">Access Control</h2>
-                    <p className="text-slate-500 text-sm">Manage the secure whitelist for your organization.</p>
+        <>
+            <header
+                className="glow"
+                style={{
+                    display: 'flex',
+                    flexWrap: 'wrap',
+                    alignItems: 'flex-end',
+                    justifyContent: 'space-between',
+                    gap: 24,
+                }}
+            >
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                    <div className="lbl">Invite-only · Google sign-in</div>
+                    <h1
+                        style={{
+                            margin: 0,
+                            fontSize: 'clamp(32px, 4vw, 48px)',
+                            fontWeight: 300,
+                            letterSpacing: '.04em',
+                            textTransform: 'uppercase',
+                            lineHeight: 1.1,
+                        }}
+                    >
+                        People &amp; access
+                    </h1>
+                    <div
+                        style={{
+                            fontSize: 14,
+                            color: '#5C5C66',
+                            maxWidth: 560,
+                            lineHeight: 1.5,
+                        }}
+                    >
+                        One list. Inviting someone gives their Google account access; removing them takes it away.
+                    </div>
                 </div>
+
                 <button
-                    onClick={() => setShowModal(true)}
-                    className="flex items-center gap-2 bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-200 active:scale-95"
+                    type="button"
+                    className="btn btn-pink"
+                    onClick={() => setInviting(true)}
                 >
-                    <Plus size={20} />
-                    Grant New Access
+                    <svg
+                        aria-hidden="true"
+                        width="16"
+                        height="16"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2.5"
+                        strokeLinecap="round"
+                    >
+                        <path d="M12 5v14M5 12h14"></path>
+                    </svg>
+                    Invite person
                 </button>
+            </header>
+
+            <div
+                role="group"
+                aria-label="Filter people"
+                style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}
+            >
+                {filterChips.map(c => {
+                    const isOn = filter === c.id;
+                    return (
+                        <button
+                            key={c.id}
+                            type="button"
+                            className="chip"
+                            aria-pressed={isOn}
+                            onClick={() => setFilter(c.id)}
+                            style={
+                                isOn
+                                    ? {
+                                          background: c.activeBg,
+                                          borderColor: c.activeBorder,
+                                          color: c.activeColor,
+                                      }
+                                    : undefined
+                            }
+                        >
+                            <i
+                                aria-hidden="true"
+                                style={{
+                                    width: 8,
+                                    height: 8,
+                                    borderRadius: '50%',
+                                    display: 'inline-block',
+                                    background: c.dot,
+                                }}
+                            />
+                            {c.label}
+                            <span style={{ fontWeight: 800 }}>{c.count}</span>
+                        </button>
+                    );
+                })}
             </div>
 
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-                <div className="lg:col-span-2">
-                    <div className="bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden">
-                        <div className="p-6 border-b border-slate-100 flex items-center justify-between">
-                            <h3 className="font-bold text-slate-800 flex items-center gap-2">
-                                <UserIcon className="text-indigo-500" size={18} />
-                                Active Profiles
-                            </h3>
-                            <span className="text-xs font-bold text-slate-400 bg-slate-50 px-2.5 py-1 rounded-lg uppercase">
-                                {profiles.length} Users Logged In
-                            </span>
-                        </div>
-                        {loading ? (
-                            <div className="p-20 flex flex-col items-center justify-center text-slate-400">
-                                <Loader2 className="animate-spin mb-4" size={32} />
-                                <p className="font-medium">Fetching active users...</p>
-                            </div>
-                        ) : (
-                            <div className="overflow-x-auto">
-                                <table className="w-full text-left">
-                                    <thead className="bg-slate-50 border-b border-slate-100">
-                                        <tr>
-                                            <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-widest">User</th>
-                                            <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-widest">Role</th>
-                                            <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-widest text-center">Status</th>
-                                            <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-widest text-right">Actions</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody className="divide-y divide-slate-100">
-                                        {profiles.map(p => (
-                                            <tr key={p.id} className="hover:bg-slate-50/50 transition-colors">
-                                                <td className="px-6 py-4">
-                                                    <div className="flex items-center gap-3">
-                                                        {p.avatarUrl ? (
-                                                            <img src={p.avatarUrl} alt={p.name} className="w-10 h-10 rounded-xl object-cover" />
-                                                        ) : (
-                                                            <div className="w-10 h-10 rounded-xl bg-indigo-50 flex items-center justify-center text-indigo-600 font-bold">
-                                                                {p.name.charAt(0)}
-                                                            </div>
-                                                        )}
-                                                        <div>
-                                                            <p className="font-bold text-slate-800">{p.name}</p>
-                                                            <p className="text-xs text-slate-500">{p.email}</p>
-                                                        </div>
-                                                    </div>
-                                                </td>
-                                                <td className="px-6 py-4">
-                                                    <div className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${p.role === UserRole.ADMIN ? 'bg-amber-50 text-amber-600 border border-amber-100' : 'bg-blue-50 text-blue-600 border border-blue-100'}`}>
-                                                        {p.role === UserRole.ADMIN ? <Shield size={10} /> : <UserIcon size={10} />}
-                                                        {p.role}
-                                                    </div>
-                                                </td>
-                                                <td className="px-6 py-4 text-center">
-                                                    <span className="inline-flex items-center gap-1.5 text-xs font-bold text-emerald-500 bg-emerald-50 px-2 py-1 rounded-lg">
-                                                        <div className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-                                                        Active
+            <section
+                aria-label="People"
+                style={{
+                    background: '#F7F5F2',
+                    border: '1px solid #E3DFD8',
+                    borderRadius: 4,
+                    overflowX: 'auto',
+                }}
+            >
+                {loading ? (
+                    <div style={{ padding: 48, textAlign: 'center', color: '#5C5C66', fontSize: 14 }}>
+                        Loading people &amp; access…
+                    </div>
+                ) : (
+                    <table
+                        className="rtable"
+                        style={{
+                            width: '100%',
+                            minWidth: 820,
+                            borderCollapse: 'collapse',
+                            fontSize: 14,
+                        }}
+                    >
+                        <thead>
+                            <tr style={{ textAlign: 'left' }}>
+                                <th
+                                    scope="col"
+                                    className="lbl"
+                                    style={{
+                                        padding: '16px 24px',
+                                        fontWeight: 500,
+                                        borderBottom: '1px solid #E3DFD8',
+                                    }}
+                                >
+                                    Person
+                                </th>
+                                <th
+                                    scope="col"
+                                    className="lbl"
+                                    style={{
+                                        padding: '16px 8px',
+                                        fontWeight: 500,
+                                        borderBottom: '1px solid #E3DFD8',
+                                    }}
+                                >
+                                    Role
+                                </th>
+                                <th
+                                    scope="col"
+                                    className="lbl"
+                                    style={{
+                                        padding: '16px 8px',
+                                        fontWeight: 500,
+                                        borderBottom: '1px solid #E3DFD8',
+                                    }}
+                                >
+                                    Status
+                                </th>
+                                <th
+                                    scope="col"
+                                    className="lbl"
+                                    style={{
+                                        padding: '16px 8px',
+                                        fontWeight: 500,
+                                        borderBottom: '1px solid #E3DFD8',
+                                    }}
+                                >
+                                    Last sign-in
+                                </th>
+                                <th
+                                    scope="col"
+                                    style={{
+                                        padding: '16px 24px',
+                                        borderBottom: '1px solid #E3DFD8',
+                                    }}
+                                >
+                                    <span
+                                        style={{
+                                            position: 'absolute',
+                                            width: 1,
+                                            height: 1,
+                                            overflow: 'hidden',
+                                            clip: 'rect(0 0 0 0)',
+                                        }}
+                                    >
+                                        Actions
+                                    </span>
+                                </th>
+                            </tr>
+                        </thead>
+                        <tbody className="stagger">
+                            {filteredPeople.map(p => (
+                                <tr key={p.key}>
+                                    <td
+                                        style={{
+                                            padding: '12px 24px',
+                                            borderBottom: '1px solid #E3DFD8',
+                                        }}
+                                    >
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                                            <div
+                                                aria-hidden="true"
+                                                style={{
+                                                    width: 36,
+                                                    height: 36,
+                                                    flex: 'none',
+                                                    borderRadius: 4,
+                                                    background: p.avatarBg,
+                                                    color: p.avatarColor,
+                                                    display: 'flex',
+                                                    alignItems: 'center',
+                                                    justifyContent: 'center',
+                                                    fontWeight: 700,
+                                                    fontSize: 14,
+                                                }}
+                                            >
+                                                {p.initials}
+                                            </div>
+                                            <div
+                                                style={{
+                                                    display: 'flex',
+                                                    flexDirection: 'column',
+                                                    gap: 4,
+                                                    minWidth: 0,
+                                                }}
+                                            >
+                                                <div
+                                                    style={{
+                                                        display: 'flex',
+                                                        alignItems: 'center',
+                                                        gap: 8,
+                                                        flexWrap: 'wrap',
+                                                    }}
+                                                >
+                                                    <span style={{ fontWeight: 600 }}>{p.name}</span>
+                                                    {p.isMe && (
+                                                        <span className="pill p-plum">
+                                                            <i aria-hidden="true"></i>You
+                                                        </span>
+                                                    )}
+                                                    {p.isExternal && (
+                                                        <span className="pill p-pink">
+                                                            <i aria-hidden="true"></i>External
+                                                        </span>
+                                                    )}
+                                                </div>
+                                                <span style={{ fontSize: 13, color: '#5C5C66' }}>
+                                                    {p.email}
+                                                </span>
+                                                {p.warning && (
+                                                    <span style={{ fontSize: 12, color: '#050507' }}>
+                                                        <b style={{ color: '#C6283D' }}>Check:</b> {p.warning}
                                                     </span>
-                                                </td>
-                                                <td className="px-6 py-4 text-right">
-                                                    <button
-                                                        onClick={() => handleDeleteUser(p.email, p.id)}
-                                                        disabled={p.email === currentUser?.email}
-                                                        className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-xl transition-all disabled:opacity-0"
-                                                    >
-                                                        <Trash2 size={18} />
-                                                    </button>
-                                                </td>
-                                            </tr>
-                                        ))}
-                                    </tbody>
-                                </table>
-                            </div>
-                        )}
-                    </div>
-                </div>
+                                                )}
+                                            </div>
+                                        </div>
+                                    </td>
 
-                <div className="space-y-6">
-                    <div className="bg-slate-900 rounded-2xl p-6 text-white shadow-xl">
-                        <h3 className="font-bold text-lg mb-4 flex items-center gap-2">
-                            <Shield className="text-indigo-400" size={20} />
-                            Authorized Whitelist
-                        </h3>
-                        <p className="text-slate-400 text-sm mb-6 leading-relaxed">
-                            These emails are pre-authorized to join via Google. If an email isn't on this list, they cannot log in.
-                        </p>
-                        <div className="space-y-3">
-                            {whitelist.map(entry => (
-                                <div key={entry.email} className="flex items-center justify-between p-3 bg-slate-800/50 rounded-xl border border-slate-700/50 group">
-                                    <div className="overflow-hidden">
-                                        <p className="text-sm font-bold truncate">{entry.email}</p>
-                                        <p className="text-[10px] text-slate-500 uppercase font-black tracking-widest">{entry.role}</p>
-                                    </div>
-                                    <button
-                                        onClick={() => handleDeleteUser(entry.email)}
-                                        disabled={entry.email === currentUser.email}
-                                        className="p-2 text-slate-500 hover:text-red-400 hover:bg-red-400/10 rounded-lg transition-all opacity-0 group-hover:opacity-100 disabled:hidden"
+                                    <td
+                                        data-l="Role"
+                                        style={{
+                                            padding: '12px 8px',
+                                            borderBottom: '1px solid #E3DFD8',
+                                        }}
                                     >
-                                        <Trash2 size={16} />
-                                    </button>
-                                </div>
+                                        <select
+                                            className="field"
+                                            aria-label={`Role for ${p.name}`}
+                                            disabled={p.isMe}
+                                            value={p.role}
+                                            onChange={e =>
+                                                handleRoleChange(p, e.target.value as UserRole)
+                                            }
+                                            style={{ width: 140 }}
+                                        >
+                                            <option value={UserRole.ADMIN}>Admin</option>
+                                            <option value={UserRole.REGULAR}>Regular</option>
+                                        </select>
+                                    </td>
+
+                                    <td
+                                        data-l="Status"
+                                        style={{
+                                            padding: '12px 8px',
+                                            borderBottom: '1px solid #E3DFD8',
+                                        }}
+                                    >
+                                        {p.status === 'active' ? (
+                                            <span className="pill p-use">
+                                                <i className="live" aria-hidden="true"></i>Active
+                                            </span>
+                                        ) : (
+                                            <span className="pill p-sand">
+                                                <i aria-hidden="true"></i>Invited · not signed in yet
+                                            </span>
+                                        )}
+                                    </td>
+
+                                    <td
+                                        data-l="Last sign-in"
+                                        style={{
+                                            padding: '12px 8px',
+                                            borderBottom: '1px solid #E3DFD8',
+                                            color: '#5C5C66',
+                                        }}
+                                    >
+                                        {p.lastSignIn}
+                                    </td>
+
+                                    <td
+                                        className="act"
+                                        style={{
+                                            padding: '12px 24px',
+                                            borderBottom: '1px solid #E3DFD8',
+                                            textAlign: 'right',
+                                        }}
+                                    >
+                                        {!p.isMe && (
+                                            <button
+                                                type="button"
+                                                className="icon-btn danger"
+                                                aria-label={`Remove access for ${p.name}`}
+                                                title="Remove access"
+                                                onClick={() => setRemoveTarget(p)}
+                                            >
+                                                <svg
+                                                    aria-hidden="true"
+                                                    width="18"
+                                                    height="18"
+                                                    viewBox="0 0 24 24"
+                                                    fill="none"
+                                                    stroke="currentColor"
+                                                    strokeWidth="2"
+                                                    strokeLinecap="round"
+                                                    strokeLinejoin="round"
+                                                >
+                                                    <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path>
+                                                    <circle cx="9" cy="7" r="4"></circle>
+                                                    <path d="M17 11h6"></path>
+                                                </svg>
+                                            </button>
+                                        )}
+                                    </td>
+                                </tr>
                             ))}
+                        </tbody>
+                    </table>
+                )}
+            </section>
+
+            {/* Remove Access Confirmation Dialog */}
+            {removeTarget && (
+                <div
+                    className="fadein"
+                    style={{
+                        position: 'fixed',
+                        inset: 0,
+                        background: 'rgba(5,5,7,.45)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        padding: 24,
+                        zIndex: 10,
+                    }}
+                >
+                    <div
+                        className="emerge"
+                        role="dialog"
+                        aria-modal="true"
+                        aria-labelledby="rm-h"
+                        style={{
+                            width: '100%',
+                            maxWidth: 480,
+                            background: '#F7F5F2',
+                            borderRadius: 4,
+                            padding: 28,
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: 16,
+                        }}
+                    >
+                        <h2 id="rm-h" style={{ margin: 0, fontSize: 20, fontWeight: 600 }}>
+                            Remove {removeTarget.name}&apos;s access?
+                        </h2>
+                        <div style={{ fontSize: 14, color: '#5C5C66', lineHeight: 1.5 }}>
+                            {removeTarget.email} won&apos;t be able to sign in. Their projects and portraits stay. You can invite them again any time.
                         </div>
-                    </div>
-                </div>
-            </div>
-
-            {showModal && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200">
-                    <div className="bg-white w-full max-w-md rounded-3xl p-8 shadow-2xl animate-in zoom-in-95 duration-300">
-                        <div className="flex items-center gap-4 mb-6">
-                            <div className="p-3 bg-indigo-50 rounded-2xl text-indigo-600">
-                                <Plus size={24} />
-                            </div>
-                            <div>
-                                <h2 className="text-xl font-bold text-slate-800">Grant Access</h2>
-                                <p className="text-slate-500 text-sm">Add a user to the secure whitelist.</p>
-                            </div>
+                        <div
+                            style={{
+                                display: 'flex',
+                                gap: 12,
+                                flexWrap: 'wrap',
+                                justifyContent: 'flex-end',
+                            }}
+                        >
+                            <button
+                                type="button"
+                                className="btn"
+                                onClick={() => setRemoveTarget(null)}
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                type="button"
+                                className="btn btn-danger"
+                                disabled={isRemoving}
+                                onClick={handleConfirmRemove}
+                            >
+                                {isRemoving ? 'Removing…' : 'Remove access'}
+                            </button>
                         </div>
-
-                        {error && (
-                            <div className="mb-6 flex items-center gap-3 p-4 bg-red-50 text-red-600 rounded-2xl text-sm font-bold border border-red-100 animate-in shake duration-300">
-                                <AlertCircle size={18} />
-                                {error}
-                            </div>
-                        )}
-
-                        <form onSubmit={handleGrantAccess} className="space-y-6">
-                            <div>
-                                <label className="block text-xs font-bold text-slate-400 uppercase tracking-widest mb-2 ml-1">Google Email Address</label>
-                                <div className="relative">
-                                    <Mail className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
-                                    <input
-                                        required
-                                        type="email"
-                                        value={newUser.email}
-                                        onChange={e => setNewUser({ ...newUser, email: e.target.value })}
-                                        className="w-full pl-12 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl focus:ring-2 focus:ring-indigo-500 focus:bg-white outline-none transition-all"
-                                        placeholder="user@gmail.com"
-                                    />
-                                </div>
-                            </div>
-                            <div>
-                                <label className="block text-xs font-bold text-slate-400 uppercase tracking-widest mb-2 ml-1">Access Level</label>
-                                <div className="relative">
-                                    <Shield className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
-                                    <select
-                                        value={newUser.role}
-                                        onChange={e => setNewUser({ ...newUser, role: e.target.value as UserRole })}
-                                        className="w-full pl-12 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl focus:ring-2 focus:ring-indigo-500 focus:bg-white outline-none transition-all appearance-none"
-                                    >
-                                        <option value={UserRole.REGULAR}>Regular User</option>
-                                        <option value={UserRole.ADMIN}>Super Admin</option>
-                                    </select>
-                                </div>
-                            </div>
-
-                            <div className="flex gap-4 pt-4">
-                                <button
-                                    type="button"
-                                    onClick={() => setShowModal(false)}
-                                    className="flex-1 py-4 text-slate-500 font-bold hover:bg-slate-50 rounded-2xl transition-all"
-                                >
-                                    Cancel
-                                </button>
-                                <button
-                                    type="submit"
-                                    className="flex-1 py-4 bg-slate-900 text-white font-bold rounded-2xl hover:bg-indigo-600 transition-all shadow-lg active:scale-95"
-                                >
-                                    Authorize User
-                                </button>
-                            </div>
-                        </form>
                     </div>
                 </div>
             )}
-        </div>
+
+            {/* Invite a Person Dialog */}
+            {inviting && (
+                <div
+                    className="fadein"
+                    style={{
+                        position: 'fixed',
+                        inset: 0,
+                        background: 'rgba(5,5,7,.45)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        padding: 24,
+                        zIndex: 10,
+                    }}
+                >
+                    <div
+                        className="emerge"
+                        role="dialog"
+                        aria-modal="true"
+                        aria-labelledby="inv-h"
+                        style={{
+                            maxHeight: '90vh',
+                            overflowY: 'auto',
+                            boxSizing: 'border-box',
+                            width: '100%',
+                            maxWidth: 520,
+                            background: '#F7F5F2',
+                            borderRadius: 4,
+                            padding: 28,
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: 20,
+                        }}
+                    >
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                            <h2 id="inv-h" style={{ margin: 0, fontSize: 20, fontWeight: 600 }}>
+                                Invite a person
+                            </h2>
+                            <div style={{ fontSize: 14, color: '#5C5C66' }}>
+                                Email, role, and the projects they can see. They sign in with this Google account.
+                            </div>
+                        </div>
+
+                        <label style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                            <span className="lbl" style={{ fontSize: 10 }}>
+                                Email
+                            </span>
+                            <input
+                                className="field"
+                                type="email"
+                                placeholder="name@5d-vr.com"
+                                value={invEmail}
+                                onChange={e => setInvEmail(e.target.value)}
+                                style={{ minHeight: 44, fontSize: 14 }}
+                            />
+                        </label>
+
+                        {isInvExternal && (
+                            <div style={{ fontSize: 13, color: '#050507' }}>
+                                <b style={{ color: '#C6283D' }}>Check:</b> this isn&apos;t a 5d-vr.com address.
+                            </div>
+                        )}
+
+                        <fieldset
+                            style={{
+                                border: 0,
+                                margin: 0,
+                                padding: 0,
+                                display: 'flex',
+                                flexDirection: 'column',
+                                gap: 8,
+                            }}
+                        >
+                            <legend
+                                className="lbl"
+                                style={{ fontSize: 10, padding: 0, marginBottom: 8 }}
+                            >
+                                Role
+                            </legend>
+                            <label
+                                style={{
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: 10,
+                                    fontSize: 14,
+                                    minHeight: 40,
+                                    cursor: 'pointer',
+                                }}
+                            >
+                                <input
+                                    type="radio"
+                                    name="role"
+                                    checked={invRole === UserRole.REGULAR}
+                                    onChange={() => setInvRole(UserRole.REGULAR)}
+                                    style={{ width: 18, height: 18, accentColor: '#FF0066' }}
+                                />
+                                Regular · sees the projects they&apos;re added to
+                            </label>
+                            <label
+                                style={{
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: 10,
+                                    fontSize: 14,
+                                    minHeight: 40,
+                                    cursor: 'pointer',
+                                }}
+                            >
+                                <input
+                                    type="radio"
+                                    name="role"
+                                    checked={invRole === UserRole.ADMIN}
+                                    onChange={() => setInvRole(UserRole.ADMIN)}
+                                    style={{ width: 18, height: 18, accentColor: '#FF0066' }}
+                                />
+                                Admin · sees and manages everything
+                            </label>
+                        </fieldset>
+
+                        {invRole === UserRole.REGULAR ? (
+                            <div
+                                style={{
+                                    display: 'flex',
+                                    flexDirection: 'column',
+                                    gap: 8,
+                                    position: 'relative',
+                                }}
+                            >
+                                <span className="lbl" id="pj-l" style={{ fontSize: 10 }}>
+                                    Projects
+                                </span>
+                                <button
+                                    className="field msel"
+                                    type="button"
+                                    aria-haspopup="listbox"
+                                    aria-expanded={projectPickerOpen}
+                                    aria-labelledby="pj-l"
+                                    onClick={() => setProjectPickerOpen(prev => !prev)}
+                                >
+                                    <span
+                                        style={{
+                                            color:
+                                                selectedProjectIds.length === 0
+                                                    ? '#5C5C66'
+                                                    : '#050507',
+                                            whiteSpace: 'nowrap',
+                                            overflow: 'hidden',
+                                            textOverflow: 'ellipsis',
+                                        }}
+                                    >
+                                        {pjSummary}
+                                    </span>
+                                    <svg
+                                        aria-hidden="true"
+                                        width="16"
+                                        height="16"
+                                        viewBox="0 0 24 24"
+                                        fill="none"
+                                        stroke="currentColor"
+                                        strokeWidth="2"
+                                        strokeLinecap="round"
+                                        strokeLinejoin="round"
+                                    >
+                                        <path d="M6 9l6 6 6-6"></path>
+                                    </svg>
+                                </button>
+
+                                {projectPickerOpen && (
+                                    <div
+                                        className="emerge"
+                                        style={{
+                                            background: '#F7F5F2',
+                                            border: '1px solid #CFCAC1',
+                                            borderRadius: 4,
+                                            boxShadow: '0 18px 36px -18px rgba(5,5,7,.45)',
+                                            padding: 8,
+                                            display: 'flex',
+                                            flexDirection: 'column',
+                                            gap: 6,
+                                        }}
+                                    >
+                                        <input
+                                            className="field"
+                                            type="search"
+                                            placeholder="Search projects"
+                                            aria-label="Search projects"
+                                            value={projectSearch}
+                                            onChange={e => setProjectSearch(e.target.value)}
+                                            style={{ minHeight: 40, fontSize: 13 }}
+                                        />
+                                        <div
+                                            style={{
+                                                display: 'flex',
+                                                justifyContent: 'space-between',
+                                                alignItems: 'center',
+                                                padding: '0 4px',
+                                                fontSize: 12,
+                                                color: '#5C5C66',
+                                            }}
+                                        >
+                                            <span>{selectedProjectIds.length} selected</span>
+                                            <button
+                                                type="button"
+                                                onClick={() => {
+                                                    if (
+                                                        selectedProjectIds.length === projects.length
+                                                    ) {
+                                                        setSelectedProjectIds([]);
+                                                    } else {
+                                                        setSelectedProjectIds(projects.map(p => p.id));
+                                                    }
+                                                }}
+                                                style={{
+                                                    border: 0,
+                                                    background: 'transparent',
+                                                    color: '#050507',
+                                                    fontFamily: 'inherit',
+                                                    fontSize: 12,
+                                                    fontWeight: 600,
+                                                    textDecoration: 'underline',
+                                                    textDecorationColor: '#FF0066',
+                                                    textUnderlineOffset: 3,
+                                                    cursor: 'pointer',
+                                                    minHeight: 32,
+                                                }}
+                                            >
+                                                {selectedProjectIds.length === projects.length
+                                                    ? 'Clear all'
+                                                    : 'Select all'}
+                                            </button>
+                                        </div>
+
+                                        <div
+                                            role="listbox"
+                                            aria-multiselectable="true"
+                                            aria-labelledby="pj-l"
+                                            style={{
+                                                maxHeight: 220,
+                                                overflowY: 'auto',
+                                                display: 'flex',
+                                                flexDirection: 'column',
+                                                gap: 2,
+                                            }}
+                                        >
+                                            {matchingProjectsForPicker.map(o => {
+                                                const isOn = selectedProjectIds.includes(o.id);
+                                                const isFinished =
+                                                    o.is_active === false || o.status === 'paused';
+                                                const pillCls = isFinished
+                                                    ? 'pill p-done'
+                                                    : 'pill p-use';
+                                                const statusText = isFinished
+                                                    ? 'Finished'
+                                                    : 'In use';
+
+                                                return (
+                                                    <label
+                                                        key={o.id}
+                                                        className={`mopt${isOn ? ' on' : ''}`}
+                                                    >
+                                                        <input
+                                                            type="checkbox"
+                                                            checked={isOn}
+                                                            onChange={() =>
+                                                                setSelectedProjectIds(prev =>
+                                                                    isOn
+                                                                        ? prev.filter(id => id !== o.id)
+                                                                        : [...prev, o.id]
+                                                                )
+                                                            }
+                                                        />
+                                                        <span
+                                                            style={{
+                                                                flex: 1,
+                                                                minWidth: 0,
+                                                                whiteSpace: 'nowrap',
+                                                                overflow: 'hidden',
+                                                                textOverflow: 'ellipsis',
+                                                            }}
+                                                        >
+                                                            {o.name}
+                                                        </span>
+                                                        <span
+                                                            className={pillCls}
+                                                            style={{ fontSize: 11, padding: '2px 8px' }}
+                                                        >
+                                                            <i aria-hidden="true"></i>
+                                                            {statusText}
+                                                        </span>
+                                                    </label>
+                                                );
+                                            })}
+                                            {matchingProjectsForPicker.length === 0 && (
+                                                <div
+                                                    style={{
+                                                        padding: 12,
+                                                        fontSize: 13,
+                                                        color: '#5C5C66',
+                                                    }}
+                                                >
+                                                    No projects match.
+                                                </div>
+                                            )}
+                                        </div>
+
+                                        <button
+                                            type="button"
+                                            className="btn"
+                                            onClick={() => setProjectPickerOpen(false)}
+                                            style={{ minHeight: 40, alignSelf: 'flex-end' }}
+                                        >
+                                            Done
+                                        </button>
+                                    </div>
+                                )}
+
+                                {selectedProjectIds.length > 0 && (
+                                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                                        {selectedProjectIds.map(pid => {
+                                            const proj = projects.find(p => p.id === pid);
+                                            if (!proj) return null;
+                                            return (
+                                                <span key={pid} className="pill p-plum emerge">
+                                                    <i aria-hidden="true"></i>
+                                                    {proj.name}
+                                                    <button
+                                                        type="button"
+                                                        aria-label={`Remove ${proj.name}`}
+                                                        onClick={() =>
+                                                            setSelectedProjectIds(prev =>
+                                                                prev.filter(id => id !== pid)
+                                                            )
+                                                        }
+                                                        style={{
+                                                            border: 0,
+                                                            background: 'transparent',
+                                                            color: 'inherit',
+                                                            cursor: 'pointer',
+                                                            padding: '0 0 0 4px',
+                                                            fontSize: 14,
+                                                            lineHeight: 1,
+                                                        }}
+                                                    >
+                                                        ×
+                                                    </button>
+                                                </span>
+                                            );
+                                        })}
+                                    </div>
+                                )}
+                            </div>
+                        ) : (
+                            <div
+                                style={{
+                                    fontSize: 13,
+                                    color: '#5C5C66',
+                                    padding: '12px 14px',
+                                    background: '#EFE3EC',
+                                    borderRadius: 4,
+                                }}
+                            >
+                                Admins see and manage every project, so there&apos;s nothing to pick.
+                            </div>
+                        )}
+
+                        <div
+                            style={{
+                                display: 'flex',
+                                gap: 12,
+                                flexWrap: 'wrap',
+                                justifyContent: 'flex-end',
+                            }}
+                        >
+                            <button
+                                type="button"
+                                className="btn"
+                                onClick={() => setInviting(false)}
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                type="button"
+                                className="btn btn-pink"
+                                disabled={!isInviteValid || isSendingInvite}
+                                onClick={handleSendInvite}
+                            >
+                                {isSendingInvite ? 'Sending…' : 'Send invite'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {toast && (
+                <div
+                    className="toast"
+                    role="status"
+                    style={{
+                        position: 'fixed',
+                        bottom: 32,
+                        left: '50%',
+                        transform: 'translateX(-50%)',
+                        padding: '14px 20px',
+                        background: '#050507',
+                        color: '#F7F5F2',
+                        borderRadius: 4,
+                        fontSize: 14,
+                        fontWeight: 500,
+                        zIndex: 11,
+                    }}
+                >
+                    {toast}
+                </div>
+            )}
+        </>
     );
 }

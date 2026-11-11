@@ -5,13 +5,13 @@ import { createClient } from '@supabase/supabase-js';
 
 const supabase = createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL || '',
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || ''
+    process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || ''
 );
 
 export async function POST(request: NextRequest) {
     try {
         const body = await request.json();
-        const { public_id, tag, action, cloudName: reqCloudName, apiKey: reqApiKey, apiSecret: reqApiSecret } = body;
+        const { public_id, tag, action, projectId, cloudName: reqCloudName, apiKey: reqApiKey, apiSecret: reqApiSecret } = body;
 
         if (!public_id || !tag || !action) {
             return NextResponse.json({ error: 'Missing required fields' }, { status: 400 });
@@ -21,7 +21,23 @@ export async function POST(request: NextRequest) {
         let apiKey = reqApiKey;
         let apiSecret = reqApiSecret;
 
-        // If credentials not in body, try fetching from Supabase
+        // 1. Check project-specific credentials first if projectId is provided
+        if (projectId && (!cloudName || !apiKey || !apiSecret)) {
+            const { data: proj } = await supabase
+                .from('projects')
+                .select('cloudinary_cloud_name, cloudinary_api_key, cloudinary_api_secret, operator_settings')
+                .eq('id', projectId)
+                .single();
+
+            if (proj) {
+                const op = proj.operator_settings || {};
+                cloudName = cloudName || proj.cloudinary_cloud_name || op.cloudinaryCloudName;
+                apiKey = apiKey || proj.cloudinary_api_key || op.cloudinaryApiKey;
+                apiSecret = apiSecret || proj.cloudinary_api_secret || op.cloudinaryApiSecret;
+            }
+        }
+
+        // 2. If credentials still not resolved, try fetching from Supabase global_settings
         if (!cloudName || !apiKey || !apiSecret) {
             const { data: settings } = await supabase
                 .from('global_settings')

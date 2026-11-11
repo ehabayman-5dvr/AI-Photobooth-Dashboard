@@ -72,6 +72,21 @@ async function verify() {
     console.log(`✅ Global settings ('current'): Ready`);
   }
 
+  // 5. Check Project Settings Columns
+  console.log('\n--- Checking Project Settings & Operator Columns ---');
+  const { error: colErr } = await supabase
+    .from('projects')
+    .select('project_type, cloudinary_folder, ai_models_list, selected_ai_model, enable_printing, total_printed_copies, operator_settings')
+    .limit(1);
+
+  if (colErr) {
+    console.warn(`⚠️ Project operator settings columns not yet migrated: ${colErr.message}`);
+    console.warn('   Run supabase/migrations/20261109153000_add_project_operator_settings.sql in Supabase SQL Editor.');
+    allPassed = false;
+  } else {
+    console.log('✅ Project operator settings columns: Ready');
+  }
+
   console.log('\n=============================================');
   if (allPassed) {
     console.log('🎉 Database verification SUCCEEDED! Everything is configured properly.');
