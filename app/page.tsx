@@ -167,13 +167,14 @@ export default function DashboardPage() {
             }
         }
 
-        const inUseCount = allProjects.filter(p => getProjectDisplayStatus(p).category === 'use').length;
-        const finishedCount = allProjects.filter(p => getProjectDisplayStatus(p).category === 'done').length;
+        const activeProjects = allProjects.filter(p => getProjectDisplayStatus(p).category === 'use');
+        const inUseCount = activeProjects.length;
+        const finishedCount = allProjects.length - inUseCount;
 
-        // Closest to limit
+        // Closest to limit (strictly among active / "In use" projects)
         let closestProject: Project | null = null;
         let closestRatio = -1;
-        for (const p of allProjects) {
+        for (const p of activeProjects) {
             const limit = Math.max(1, p.dailyLimit || 1000);
             const ratio = (p.currentGenerations || 0) / limit;
             if (ratio > closestRatio) {
@@ -377,8 +378,15 @@ export default function DashboardPage() {
     }, [usageLogs, timeRange, customRange, kpiData.totalPortraits]);
 
     const topProjects = useMemo(() => {
-        return [...allProjects]
-            .sort((a, b) => (b.currentGenerations || 0) - (a.currentGenerations || 0))
+        return allProjects
+            .filter(p => getProjectDisplayStatus(p).category === 'use')
+            .sort((a, b) => {
+                const usageDiff = (b.currentGenerations || 0) - (a.currentGenerations || 0);
+                if (usageDiff !== 0) return usageDiff;
+                const aTime = new Date(a.createdAt || 0).getTime() || 0;
+                const bTime = new Date(b.createdAt || 0).getTime() || 0;
+                return bTime - aTime;
+            })
             .slice(0, 5);
     }, [allProjects]);
 
@@ -642,7 +650,9 @@ export default function DashboardPage() {
                                     </svg>
                                 </span>
                             </div>
-                            <div style={{ fontSize: 40, fontWeight: 300 }}>{kpiData.closestPct}%</div>
+                            <div style={{ fontSize: 40, fontWeight: 300 }}>
+                                {kpiData.closestProject ? `${kpiData.closestPct}%` : '—'}
+                            </div>
                             <div style={{ fontSize: 13, color: '#5C5C66', lineHeight: 1.5 }}>
                                 {kpiData.closestProject
                                     ? `${kpiData.closestProject.name} · ${kpiData.closestRemaining.toLocaleString()} portraits left.`
@@ -924,7 +934,9 @@ export default function DashboardPage() {
                                     borderRadius: 4,
                                 }}
                             >
-                                No projects assigned yet.
+                                {allProjects.length === 0
+                                    ? 'No projects assigned yet.'
+                                    : 'No projects currently in use.'}
                             </div>
                         ) : (
                             <div style={{ overflowX: 'auto' }}>

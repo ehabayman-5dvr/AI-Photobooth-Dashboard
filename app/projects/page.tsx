@@ -18,7 +18,7 @@ import { useSearchParams, useRouter } from 'next/navigation';
 import { useAuth } from '@/components/AuthContext';
 
 type FilterChipId = 'all' | 'use' | 'done';
-type SortMode = 'most' | 'least' | 'name';
+type SortMode = 'active' | 'newest' | 'most' | 'least' | 'name';
 type ViewMode = 'cards' | 'table';
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -62,7 +62,7 @@ function ProjectsContent() {
 
     const [filter, setFilter] = useState<FilterChipId>('all');
     const [searchTerm, setSearchTerm] = useState('');
-    const [sortBy, setSortBy] = useState<SortMode>('most');
+    const [sortBy, setSortBy] = useState<SortMode>('active');
     const [viewMode, setViewMode] = useState<ViewMode>('cards');
     const [showModal, setShowModal] = useState(false);
 
@@ -389,6 +389,31 @@ function ProjectsContent() {
         });
 
         list.sort((a, b) => {
+            if (sortBy === 'active') {
+                const aActive = getProjectCategory(a).cat === 'use' ? 1 : 0;
+                const bActive = getProjectCategory(b).cat === 'use' ? 1 : 0;
+                if (aActive !== bActive) {
+                    return bActive - aActive;
+                }
+                if (aActive === 1) {
+                    const aLatest = new Date(lastPortraitByProject[a.id] || a.createdAt || 0).getTime() || 0;
+                    const bLatest = new Date(lastPortraitByProject[b.id] || b.createdAt || 0).getTime() || 0;
+                    if (bLatest !== aLatest) return bLatest - aLatest;
+                    return (b.currentGenerations || 0) - (a.currentGenerations || 0);
+                }
+                const usageDiff = (b.currentGenerations || 0) - (a.currentGenerations || 0);
+                if (usageDiff !== 0) return usageDiff;
+                const aCreated = new Date(a.createdAt || 0).getTime() || 0;
+                const bCreated = new Date(b.createdAt || 0).getTime() || 0;
+                if (bCreated !== aCreated) return bCreated - aCreated;
+                return a.name.localeCompare(b.name);
+            }
+            if (sortBy === 'newest') {
+                const aCreated = new Date(a.createdAt || 0).getTime() || 0;
+                const bCreated = new Date(b.createdAt || 0).getTime() || 0;
+                if (bCreated !== aCreated) return bCreated - aCreated;
+                return a.name.localeCompare(b.name);
+            }
             if (sortBy === 'most') {
                 return (b.currentGenerations || 0) - (a.currentGenerations || 0);
             }
@@ -399,7 +424,7 @@ function ProjectsContent() {
         });
 
         return list;
-    }, [projects, filter, searchTerm, sortBy]);
+    }, [projects, filter, searchTerm, sortBy, lastPortraitByProject]);
 
     if (!user) return null;
 
@@ -591,6 +616,8 @@ function ProjectsContent() {
                             value={sortBy}
                             onChange={e => setSortBy(e.target.value as SortMode)}
                         >
+                            <option value="active">In use first</option>
+                            <option value="newest">Newest first</option>
                             <option value="most">Most portraits</option>
                             <option value="least">Fewest portraits</option>
                             <option value="name">Name A–Z</option>

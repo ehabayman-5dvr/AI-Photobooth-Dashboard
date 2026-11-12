@@ -4,10 +4,10 @@ import { createClient } from '@supabase/supabase-js';
 // Helper to get admin client safely
 const getAdminClient = () => {
     const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-    const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
     if (!url || !key) {
-        throw new Error('Supabase admin credentials missing (URL or Service Role Key)');
+        throw new Error('Supabase credentials missing (URL or Key)');
     }
 
     return createClient(url, key);
@@ -49,10 +49,26 @@ export async function POST(
 
         if (updateError) throw updateError;
 
+        // 3. Read fresh live status & usage counters so the booth stays synced without extra calls
+        const { data: updatedProject } = await supabase
+            .from('projects')
+            .select('is_active, total_usage, max_usage')
+            .eq('id', id)
+            .single();
+
+        const isActive = updatedProject ? updatedProject.is_active !== false : true;
+        const currentGenerations = Number(updatedProject?.total_usage) || 0;
+        const dailyLimit = Number(updatedProject?.max_usage) || 1000;
+        const remaining = Math.max(0, dailyLimit - currentGenerations);
+
         return NextResponse.json({
             success: true,
             projectId: id,
             incrementedBy: amount,
+            isActive,
+            currentGenerations,
+            dailyLimit,
+            remaining,
             timestamp: new Date().toISOString()
         }, {
             status: 200,

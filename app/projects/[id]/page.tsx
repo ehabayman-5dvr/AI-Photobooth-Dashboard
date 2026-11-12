@@ -41,10 +41,17 @@ import {
     Save,
     AlertCircle,
     QrCode,
+    FileText,
+    Code2,
+    ExternalLink,
 } from 'lucide-react';
 import { useAuth } from '@/components/AuthContext';
+import {
+    generateIntegrationGuideMarkdown,
+    getIntegrationGuideFilename,
+} from '@/utils/generateIntegrationGuide';
 
-type ProjectTab = 'overview' | 'gallery' | 'featured' | 'settings';
+type ProjectTab = 'overview' | 'gallery' | 'featured' | 'developer' | 'settings';
 type ChartRange = 'event' | '7d' | '30d' | '90d' | 'all' | 'custom';
 
 const AVATAR_TINTS: Array<[string, string]> = [
@@ -90,6 +97,9 @@ export default function ProjectDetailPage() {
     const [copiedId, setCopiedId] = useState(false);
     const [copiedSyncUrl, setCopiedSyncUrl] = useState(false);
     const [copiedPrintUrl, setCopiedPrintUrl] = useState(false);
+    const [copiedMarkdown, setCopiedMarkdown] = useState(false);
+    const [copiedEnv, setCopiedEnv] = useState(false);
+    const [showMarkdownPreview, setShowMarkdownPreview] = useState(false);
     const [isSimulating, setIsSimulating] = useState(false);
     const [isSimulatingPrint, setIsSimulatingPrint] = useState(false);
     const [activeTab, setActiveTab] = useState<ProjectTab>('overview');
@@ -197,6 +207,7 @@ export default function ProjectDetailPage() {
         const tabParam = searchParams?.get('tab');
         if (tabParam === 'gallery' || tabParam === 'images') setActiveTab('gallery');
         else if (tabParam === 'featured') setActiveTab('featured');
+        else if (tabParam === 'developer') setActiveTab('developer');
         else if (tabParam === 'settings') setActiveTab('settings');
         else if (tabParam === 'overview') setActiveTab('overview');
     }, [searchParams]);
@@ -659,17 +670,15 @@ export default function ProjectDetailPage() {
         if (!project || isSimulating) return;
         setIsSimulating(true);
         try {
-            const amount = 1;
-            const { error: logError } = await supabase
-                .from('usage_logs')
-                .insert([{ project_id: project.id, amount }]);
-            if (logError) throw logError;
-
-            const { error: updateError } = await supabase.rpc('increment_project_usage', {
-                p_id: project.id,
-                p_amount: amount,
+            const res = await fetch(`/api/projects/${project.id}/generate`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ simulated: true }),
             });
-            if (updateError) throw updateError;
+            if (!res.ok) {
+                const errData = await res.json().catch(() => ({}));
+                throw new Error(errData.message || 'Generate endpoint test failed');
+            }
             await fetchProjectData();
         } catch (err) {
             console.error('Simulation error:', err);
@@ -823,6 +832,68 @@ export default function ProjectDetailPage() {
         navigator.clipboard.writeText(text);
         setCopiedPrintUrl(true);
         setTimeout(() => setCopiedPrintUrl(false), 2000);
+    };
+
+    const integrationMarkdown = useMemo(() => {
+        if (!project) return '';
+        return generateIntegrationGuideMarkdown({
+            projectId: project.id,
+            projectName: project.name,
+            projectType: project.projectType === 'web' ? 'web' : 'desktop',
+            baseUrl: origin || 'https://ai-photobooth-dashboard.vercel.app',
+            cloudinaryFolder:
+                project.cloudinaryFolder ||
+                project.cloudinaryTag ||
+                project.name.trim().replace(/\s+/g, '-'),
+            selectedAiModel: project.selectedAiModel || DEFAULT_AI_MODEL_CATALOG[0].name,
+            aiModelProvider: project.aiModelProvider === 'gemini' ? 'gemini' : 'openai',
+            dailyLimit: project.dailyLimit || 1000,
+            referenceImagesCount: project.referenceImagesCount || 1,
+        });
+    }, [project, origin]);
+
+    const integrationFilename = useMemo(
+        () => getIntegrationGuideFilename(project?.name || 'photobooth-project'),
+        [project?.name]
+    );
+
+    const envSnippet = useMemo(() => {
+        if (!project) return '';
+        const cleanBase = (origin || 'https://ai-photobooth-dashboard.vercel.app').replace(
+            /\/+$/,
+            ''
+        );
+        if (project.projectType === 'web') {
+            return `DASHBOARD_URL=${cleanBase}\nDASHBOARD_PROJECT_ID=${project.id}`;
+        }
+        return `VITE_DASHBOARD_URL=${cleanBase}\nVITE_DASHBOARD_PROJECT_ID=${project.id}`;
+    }, [project, origin]);
+
+    const handleDownloadIntegrationGuide = () => {
+        if (!integrationMarkdown) return;
+        const blob = new Blob([integrationMarkdown], { type: 'text/markdown;charset=utf-8' });
+        const url = window.URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = integrationFilename;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        window.URL.revokeObjectURL(url);
+    };
+
+    const handleCopyIntegrationGuide = () => {
+        if (!integrationMarkdown) return;
+        navigator.clipboard.writeText(integrationMarkdown);
+        setCopiedMarkdown(true);
+        setTimeout(() => setCopiedMarkdown(false), 2200);
+    };
+
+    const handleCopyEnvSnippet = () => {
+        if (!envSnippet) return;
+        navigator.clipboard.writeText(envSnippet);
+        setCopiedEnv(true);
+        setTimeout(() => setCopiedEnv(false), 2000);
     };
 
     const handleSaveProjectSettings = async (e: React.FormEvent) => {
@@ -1335,15 +1406,26 @@ export default function ProjectDetailPage() {
                     Featured
                 </button>
                 {isAdmin && (
-                    <button
-                        type="button"
-                        role="tab"
-                        aria-selected={activeTab === 'settings'}
-                        onClick={() => switchTab('settings')}
-                        className={`tab${activeTab === 'settings' ? ' on' : ''}`}
-                    >
-                        Settings
-                    </button>
+                    <>
+                        <button
+                            type="button"
+                            role="tab"
+                            aria-selected={activeTab === 'developer'}
+                            onClick={() => switchTab('developer')}
+                            className={`tab${activeTab === 'developer' ? ' on' : ''}`}
+                        >
+                            Developer
+                        </button>
+                        <button
+                            type="button"
+                            role="tab"
+                            aria-selected={activeTab === 'settings'}
+                            onClick={() => switchTab('settings')}
+                            className={`tab${activeTab === 'settings' ? ' on' : ''}`}
+                        >
+                            Settings
+                        </button>
+                    </>
                 )}
             </div>
 
@@ -3129,6 +3211,555 @@ export default function ProjectDetailPage() {
                 </section>
             )}
 
+            {/* ======================== DEVELOPER TAB (ADMIN) ======================== */}
+            {isAdmin && activeTab === 'developer' && (
+                <section
+                    style={{
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: 20,
+                        maxWidth: 1020,
+                    }}
+                >
+                    {/* Top Hero: AI Agent Integration Guide (.md) */}
+                    <div
+                        className="card"
+                        style={{
+                            padding: 26,
+                            background: 'var(--void)',
+                            color: '#fff',
+                            borderColor: 'rgba(255,255,255,.08)',
+                        }}
+                    >
+                        <div
+                            style={{
+                                display: 'flex',
+                                justifyContent: 'space-between',
+                                alignItems: 'flex-start',
+                                gap: 20,
+                                flexWrap: 'wrap',
+                            }}
+                        >
+                            <div style={{ maxWidth: 600 }}>
+                                <div
+                                    style={{
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        gap: 10,
+                                        flexWrap: 'wrap',
+                                        marginBottom: 6,
+                                    }}
+                                >
+                                    <span className="lbl" style={{ color: 'var(--pink)' }}>
+                                        AI Agent Integration Kit
+                                    </span>
+                                    <span
+                                        style={{
+                                            fontSize: 11,
+                                            fontWeight: 700,
+                                            padding: '2px 8px',
+                                            borderRadius: 4,
+                                            background: 'rgba(255,255,255,.1)',
+                                            color: '#E3DFD8',
+                                            textTransform: 'uppercase',
+                                            letterSpacing: '.04em',
+                                        }}
+                                    >
+                                        {project.projectType === 'web'
+                                            ? 'Web App Template'
+                                            : 'Desktop Kiosk Template'}
+                                    </span>
+                                </div>
+                                <h3
+                                    style={{
+                                        fontWeight: 700,
+                                        fontSize: 20,
+                                        margin: '0 0 8px',
+                                        color: '#fff',
+                                    }}
+                                >
+                                    Download or copy the ready-to-use agent guide
+                                </h3>
+                                <p
+                                    style={{
+                                        margin: 0,
+                                        fontSize: 13,
+                                        lineHeight: 1.55,
+                                        color: 'rgba(255,255,255,.72)',
+                                    }}
+                                >
+                                    Pre-filled with <b>{project.name}</b>&apos;s Project UUID, live
+                                    API URLs, Cloudinary folder, <code>5dvr-photobooth-skills</code>{' '}
+                                    routing, the 7-block prompt engine, and{' '}
+                                    {project.projectType === 'web'
+                                        ? 'server-side Web App rules (no local operator file or printing).'
+                                        : '2-layer Desktop Kiosk rules (separating cloud config from local operator-settings.json).'}{' '}
+                                    Zero API keys are hardcoded in the file.
+                                </p>
+                            </div>
+
+                            <div
+                                style={{
+                                    display: 'flex',
+                                    gap: 8,
+                                    flexWrap: 'wrap',
+                                    alignItems: 'center',
+                                }}
+                            >
+                                <button
+                                    type="button"
+                                    className="btn btn-pink"
+                                    onClick={handleDownloadIntegrationGuide}
+                                >
+                                    <Download size={14} /> Download .md guide
+                                </button>
+                                <button
+                                    type="button"
+                                    className="btn"
+                                    onClick={handleCopyIntegrationGuide}
+                                    style={{
+                                        background: 'rgba(255,255,255,.08)',
+                                        color: '#fff',
+                                        borderColor: 'rgba(255,255,255,.16)',
+                                    }}
+                                >
+                                    {copiedMarkdown ? <Check size={14} /> : <Copy size={14} />}
+                                    {copiedMarkdown ? 'Copied for agent!' : 'Copy for AI agent'}
+                                </button>
+                                <button
+                                    type="button"
+                                    className="btn"
+                                    onClick={() => setShowMarkdownPreview(prev => !prev)}
+                                    style={{
+                                        background: 'transparent',
+                                        color: 'rgba(255,255,255,.82)',
+                                        borderColor: 'rgba(255,255,255,.16)',
+                                    }}
+                                >
+                                    <FileText size={14} />
+                                    {showMarkdownPreview ? 'Hide preview' : 'Preview .md'}
+                                </button>
+                            </div>
+                        </div>
+
+                        <div
+                            style={{
+                                marginTop: 14,
+                                paddingTop: 12,
+                                borderTop: '1px solid rgba(255,255,255,.08)',
+                                display: 'flex',
+                                justifyContent: 'space-between',
+                                alignItems: 'center',
+                                gap: 12,
+                                flexWrap: 'wrap',
+                                fontSize: 12,
+                                color: 'rgba(255,255,255,.6)',
+                            }}
+                        >
+                            <span>
+                                File:{' '}
+                                <code style={{ color: '#fff', fontFamily: 'monospace' }}>
+                                    {integrationFilename}
+                                </code>
+                            </span>
+                            <span>
+                                Tip: Start with{' '}
+                                <code
+                                    style={{
+                                        color: 'var(--pink)',
+                                        fontFamily: 'monospace',
+                                        fontWeight: 700,
+                                    }}
+                                >
+                                    /grill-me
+                                </code>{' '}
+                                + attach this <code>.md</code> in Antigravity so the agent interviews
+                                you on themes, frames &amp; assets first
+                            </span>
+                        </div>
+
+                        {showMarkdownPreview && (
+                            <div
+                                style={{
+                                    marginTop: 16,
+                                    background: '#050507',
+                                    border: '1px solid rgba(255,255,255,.12)',
+                                    borderRadius: 8,
+                                    padding: 16,
+                                    maxHeight: 380,
+                                    overflowY: 'auto',
+                                }}
+                            >
+                                <pre
+                                    style={{
+                                        margin: 0,
+                                        fontSize: 12,
+                                        lineHeight: 1.55,
+                                        color: '#E3DFD8',
+                                        whiteSpace: 'pre-wrap',
+                                        wordBreak: 'break-word',
+                                        fontFamily: 'monospace',
+                                    }}
+                                >
+                                    {integrationMarkdown}
+                                </pre>
+                            </div>
+                        )}
+                    </div>
+
+                    {/* Quick Config: Project ID + .env.local */}
+                    <div className="card" style={{ padding: 28 }}>
+                        <span className="lbl">Quick setup</span>
+                        <h3 style={{ fontWeight: 700, fontSize: 18, margin: '4px 0 18px' }}>
+                            Project ID &amp; environment variables
+                        </h3>
+
+                        <div style={{ marginBottom: 18 }}>
+                            <label className="lbl" style={{ display: 'block', marginBottom: 6 }}>
+                                Project ID (UUID)
+                            </label>
+                            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                                <input
+                                    className="field"
+                                    style={{ flex: 1, fontFamily: 'monospace' }}
+                                    readOnly
+                                    value={project.id}
+                                />
+                                <button
+                                    type="button"
+                                    className="btn"
+                                    onClick={() => copyProjectId(project.id)}
+                                >
+                                    {copiedId ? '✓ Copied' : 'Copy ID'}
+                                </button>
+                            </div>
+                        </div>
+
+                        <div style={{ marginBottom: 16 }}>
+                            <div
+                                style={{
+                                    display: 'flex',
+                                    justifyContent: 'space-between',
+                                    alignItems: 'center',
+                                    marginBottom: 6,
+                                    gap: 8,
+                                }}
+                            >
+                                <label className="lbl">
+                                    {project.projectType === 'web'
+                                        ? 'Server .env.local snippet (keep server-side only)'
+                                        : 'Booth .env.local snippet'}
+                                </label>
+                                <button
+                                    type="button"
+                                    className="btn"
+                                    style={{ padding: '4px 10px', minHeight: 28, fontSize: 12 }}
+                                    onClick={handleCopyEnvSnippet}
+                                >
+                                    {copiedEnv ? '✓ Copied .env' : 'Copy .env'}
+                                </button>
+                            </div>
+                            <pre
+                                style={{
+                                    margin: 0,
+                                    padding: '12px 14px',
+                                    borderRadius: 6,
+                                    background: '#050507',
+                                    color: '#F7F5F2',
+                                    fontSize: 12.5,
+                                    lineHeight: 1.6,
+                                    fontFamily: 'monospace',
+                                    overflowX: 'auto',
+                                }}
+                            >
+                                {envSnippet}
+                            </pre>
+                        </div>
+
+                        <div
+                            style={{
+                                padding: '12px 14px',
+                                borderRadius: 8,
+                                background: 'var(--ground)',
+                                border: '1px solid #E3DFD8',
+                                fontSize: 12.5,
+                                lineHeight: 1.55,
+                                color: '#5C5C66',
+                            }}
+                        >
+                            {project.projectType === 'web' ? (
+                                <>
+                                    <b style={{ color: '#050507' }}>Web App Architecture:</b> Fetch{' '}
+                                    <code>GET /settings</code> strictly on your web app&apos;s
+                                    server route so OpenAI/Gemini and Cloudinary secrets never reach
+                                    the guest&apos;s browser. Web booths have no{' '}
+                                    <code>operator-settings.json</code> and no print endpoint.
+                                </>
+                            ) : (
+                                <>
+                                    <b style={{ color: '#050507' }}>
+                                        2-Layer Desktop Config Architecture:
+                                    </b>{' '}
+                                    Cache <code>GET /settings</code> into{' '}
+                                    <code>cloud-config.cache.json</code> (read-only cloud control
+                                    plane) and keep hardware/printer/camera/timer settings strictly
+                                    separate inside local <code>operator-settings.json</code> on the
+                                    kiosk.
+                                </>
+                            )}
+                        </div>
+                    </div>
+
+                    {/* API Endpoints Card */}
+                    <div className="card" style={{ padding: 28 }}>
+                        <div
+                            style={{
+                                display: 'flex',
+                                justifyContent: 'space-between',
+                                alignItems: 'center',
+                                gap: 12,
+                                flexWrap: 'wrap',
+                                marginBottom: 18,
+                            }}
+                        >
+                            <div>
+                                <span className="lbl">REST Endpoints</span>
+                                <h3 style={{ fontWeight: 700, fontSize: 18, margin: '4px 0 0' }}>
+                                    Live project APIs
+                                </h3>
+                            </div>
+                            <span style={{ fontSize: 12, color: 'var(--muted)' }}>
+                                CORS enabled · JSON responses
+                            </span>
+                        </div>
+
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+                            {/* 1. GET /settings */}
+                            <div
+                                style={{
+                                    padding: 16,
+                                    borderRadius: 10,
+                                    background: 'var(--ground)',
+                                    border: '1px solid #E3DFD8',
+                                }}
+                            >
+                                <div
+                                    style={{
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        justifyContent: 'space-between',
+                                        gap: 8,
+                                        flexWrap: 'wrap',
+                                        marginBottom: 8,
+                                    }}
+                                >
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                        <span
+                                            style={{
+                                                fontSize: 11,
+                                                fontWeight: 800,
+                                                padding: '2px 8px',
+                                                borderRadius: 4,
+                                                background: '#E3F9EF',
+                                                color: '#0B7A4B',
+                                                fontFamily: 'monospace',
+                                            }}
+                                        >
+                                            GET
+                                        </span>
+                                        <span style={{ fontWeight: 700, fontSize: 14 }}>
+                                            Cloud Settings Sync
+                                        </span>
+                                    </div>
+                                    <span style={{ fontSize: 12, color: 'var(--muted)' }}>
+                                        Returns active status, limit, locked AI model + key &amp;
+                                        Cloudinary config
+                                    </span>
+                                </div>
+                                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                                    <input
+                                        className="field"
+                                        style={{ flex: 1, fontFamily: 'monospace' }}
+                                        readOnly
+                                        value={`${origin}/api/projects/${project.id}/settings`}
+                                    />
+                                    <button
+                                        type="button"
+                                        className="btn"
+                                        onClick={() =>
+                                            copySyncUrlToClipboard(
+                                                `${origin}/api/projects/${project.id}/settings`
+                                            )
+                                        }
+                                    >
+                                        {copiedSyncUrl ? '✓ Copied' : 'Copy URL'}
+                                    </button>
+                                    <a
+                                        href={`/api/projects/${project.id}/settings`}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="btn"
+                                        style={{ textDecoration: 'none' }}
+                                    >
+                                        <ExternalLink size={14} /> View JSON
+                                    </a>
+                                </div>
+                            </div>
+
+                            {/* 2. POST /generate */}
+                            <div
+                                style={{
+                                    padding: 16,
+                                    borderRadius: 10,
+                                    background: 'var(--ground)',
+                                    border: '1px solid #E3DFD8',
+                                }}
+                            >
+                                <div
+                                    style={{
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        justifyContent: 'space-between',
+                                        gap: 8,
+                                        flexWrap: 'wrap',
+                                        marginBottom: 8,
+                                    }}
+                                >
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                        <span
+                                            style={{
+                                                fontSize: 11,
+                                                fontWeight: 800,
+                                                padding: '2px 8px',
+                                                borderRadius: 4,
+                                                background: '#FFE8F1',
+                                                color: '#B8004A',
+                                                fontFamily: 'monospace',
+                                            }}
+                                        >
+                                            POST
+                                        </span>
+                                        <span style={{ fontWeight: 700, fontSize: 14 }}>
+                                            Portrait Counter &amp; Live Status
+                                        </span>
+                                    </div>
+                                    <span style={{ fontSize: 12, color: 'var(--muted)' }}>
+                                        Increments usage (+1) and returns fresh{' '}
+                                        <code>isActive</code> &amp; <code>remaining</code>
+                                    </span>
+                                </div>
+                                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                                    <input
+                                        className="field"
+                                        style={{ flex: 1, fontFamily: 'monospace' }}
+                                        readOnly
+                                        value={`${origin}/api/projects/${project.id}/generate`}
+                                    />
+                                    <button
+                                        type="button"
+                                        className="btn"
+                                        onClick={() =>
+                                            copyToClipboard(
+                                                `${origin}/api/projects/${project.id}/generate`
+                                            )
+                                        }
+                                    >
+                                        {copied ? '✓ Copied' : 'Copy URL'}
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className="btn"
+                                        disabled={isSimulating}
+                                        onClick={handleSimulateApiCall}
+                                    >
+                                        {isSimulating ? 'Sending…' : '+1 Test generate'}
+                                    </button>
+                                </div>
+                            </div>
+
+                            {/* 3. POST /print (Desktop kiosks only) */}
+                            {project.projectType !== 'web' && (
+                                <div
+                                    style={{
+                                        padding: 16,
+                                        borderRadius: 10,
+                                        background: 'var(--ground)',
+                                        border: '1px solid #E3DFD8',
+                                    }}
+                                >
+                                    <div
+                                        style={{
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            justifyContent: 'space-between',
+                                            gap: 8,
+                                            flexWrap: 'wrap',
+                                            marginBottom: 8,
+                                        }}
+                                    >
+                                        <div
+                                            style={{
+                                                display: 'flex',
+                                                alignItems: 'center',
+                                                gap: 8,
+                                            }}
+                                        >
+                                            <span
+                                                style={{
+                                                    fontSize: 11,
+                                                    fontWeight: 800,
+                                                    padding: '2px 8px',
+                                                    borderRadius: 4,
+                                                    background: '#FFE8F1',
+                                                    color: '#B8004A',
+                                                    fontFamily: 'monospace',
+                                                }}
+                                            >
+                                                POST
+                                            </span>
+                                            <span style={{ fontWeight: 700, fontSize: 14 }}>
+                                                Physical Print Counter
+                                            </span>
+                                        </div>
+                                        <span style={{ fontSize: 12, color: 'var(--muted)' }}>
+                                            Desktop only · Body:{' '}
+                                            <code>{`{ "copies": 1 }`}</code>
+                                        </span>
+                                    </div>
+                                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                                        <input
+                                            className="field"
+                                            style={{ flex: 1, fontFamily: 'monospace' }}
+                                            readOnly
+                                            value={`${origin}/api/projects/${project.id}/print`}
+                                        />
+                                        <button
+                                            type="button"
+                                            className="btn"
+                                            onClick={() =>
+                                                copyPrintUrlToClipboard(
+                                                    `${origin}/api/projects/${project.id}/print`
+                                                )
+                                            }
+                                        >
+                                            {copiedPrintUrl ? '✓ Copied' : 'Copy URL'}
+                                        </button>
+                                        <button
+                                            type="button"
+                                            className="btn"
+                                            disabled={isSimulatingPrint}
+                                            onClick={handleSimulatePrintIncrement}
+                                        >
+                                            {isSimulatingPrint ? 'Testing…' : '+1 Test print'}
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                </section>
+            )}
+
             {/* ======================== SETTINGS TAB (ADMIN) ======================== */}
             {isAdmin && activeTab === 'settings' && (
                 <form
@@ -3584,11 +4215,11 @@ export default function ProjectDetailPage() {
                         </div>
                     </div>
 
-                    {/* 3. Storage & Connection (Cloudinary + APIs) */}
+                    {/* 3. Storage & Connection (Cloudinary) */}
                     <div className="card" style={{ padding: 28 }}>
-                        <span className="lbl">Storage &amp; connection</span>
+                        <span className="lbl">Storage</span>
                         <h3 style={{ fontWeight: 700, fontSize: 18, margin: '4px 0 18px' }}>
-                            Cloudinary &amp; booth endpoints
+                            Cloudinary account &amp; folder
                         </h3>
 
                         <div
@@ -3673,7 +4304,6 @@ export default function ProjectDetailPage() {
                                 borderRadius: 4,
                                 background: '#EEEBE5',
                                 border: '1px solid #E3DFD8',
-                                marginBottom: 16,
                                 fontSize: 13,
                                 color: '#5C5C66',
                             }}
@@ -3698,113 +4328,6 @@ export default function ProjectDetailPage() {
                                 >
                                     Manage Cloudinary accounts in Settings →
                                 </Link>
-                            )}
-                        </div>
-
-                        <div style={{ marginBottom: 16 }}>
-                            <label className="lbl" style={{ display: 'block', marginBottom: 6 }}>
-                                Project ID
-                            </label>
-                            <div style={{ display: 'flex', gap: 8 }}>
-                                <input className="field" readOnly value={project.id} />
-                                <button
-                                    type="button"
-                                    className="btn"
-                                    onClick={() => copyProjectId(project.id)}
-                                >
-                                    {copiedId ? '✓ Copied' : 'Copy ID'}
-                                </button>
-                            </div>
-                        </div>
-
-                        {/* Endpoints */}
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                            <div>
-                                <label className="lbl" style={{ display: 'block', marginBottom: 6 }}>
-                                    Booth portrait counter URL (POST)
-                                </label>
-                                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                                    <input
-                                        className="field"
-                                        style={{ flex: 1 }}
-                                        readOnly
-                                        value={`${origin}/api/projects/${project.id}/generate`}
-                                    />
-                                    <button
-                                        type="button"
-                                        className="btn"
-                                        onClick={() =>
-                                            copyToClipboard(
-                                                `${origin}/api/projects/${project.id}/generate`
-                                            )
-                                        }
-                                    >
-                                        {copied ? '✓ Copied' : 'Copy URL'}
-                                    </button>
-                                    <button
-                                        type="button"
-                                        className="btn"
-                                        disabled={isSimulating}
-                                        onClick={handleSimulateApiCall}
-                                    >
-                                        {isSimulating ? 'Sending…' : 'Send test'}
-                                    </button>
-                                </div>
-                            </div>
-
-                            <div>
-                                <label className="lbl" style={{ display: 'block', marginBottom: 6 }}>
-                                    Settings Sync URL (GET / POST / PUT)
-                                </label>
-                                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                                    <input
-                                        className="field"
-                                        style={{ flex: 1 }}
-                                        readOnly
-                                        value={`${origin}/api/projects/${project.id}/settings`}
-                                    />
-                                    <button
-                                        type="button"
-                                        className="btn"
-                                        onClick={() =>
-                                            copySyncUrlToClipboard(
-                                                `${origin}/api/projects/${project.id}/settings`
-                                            )
-                                        }
-                                    >
-                                        {copiedSyncUrl ? '✓ Copied' : 'Copy URL'}
-                                    </button>
-                                </div>
-                            </div>
-
-                            {settingsForm.projectType === 'desktop' && (
-                                <div>
-                                    <label
-                                        className="lbl"
-                                        style={{ display: 'block', marginBottom: 6 }}
-                                    >
-                                        Print Copies Tracking URL (POST)
-                                    </label>
-                                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                                        <input
-                                            className="field"
-                                            style={{ flex: 1 }}
-                                            readOnly
-                                            value={`${origin}/api/projects/${project.id}/print`}
-                                        />
-                                        <button
-                                            type="button"
-                                            className="btn"
-                                            onClick={() =>
-                                                copyPrintUrlToClipboard(
-                                                    `${origin}/api/projects/${project.id}/print`
-                                                )
-                                            }
-                                        >
-                                            {copiedPrintUrl ? '✓ Copied' : 'Copy URL'}
-                                        </button>
-                                    </div>
-                                </div>
                             )}
                         </div>
                     </div>
