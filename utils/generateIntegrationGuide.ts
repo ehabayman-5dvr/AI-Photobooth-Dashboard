@@ -303,6 +303,10 @@ function buildCloudinaryContextString(fullPrompt: string, extra?: Record<string,
 \`\`\`
 
 > **Important SHA-1 Signature Rule:** Include every non-file parameter you append to \`FormData\` (\`context\`, \`folder\`, \`tags\`, \`timestamp\`) sorted **alphabetically by key** (\`context=...&folder=...&tags=...&timestamp=...\`), append \`cloudConfig.cloudinaryApiSecret\` directly with no \`&\`, and hash with \`SHA-1\`. Never include \`file\` or \`api_key\` in the signature string.
+>
+> **Electron Main-Process IPC Rule (CRITICAL):** Many Electron kiosks perform Cloudinary uploads inside \`electron/main.cjs\` (e.g. \`ipcMain.handle('upload-to-cloudinary')\`) in addition to a browser dev fallback in \`src/services/cloudinaryService.ts\`. Inspect **both** files and ensure **both** paths:
+> 1. Receive \`cloudName\`, \`apiKey\`, \`apiSecret\`, and \`folder\` from \`cloudConfig\` (never falling back to stale keys inside \`operator-settings.json\` or hardcoded secrets).
+> 2. Append \`tags = folder\` and use the **900-char \`prompt_0, prompt_1, ...\` chunker** above (do **not** pass a single unchunked \`prompt=...\` key, which truncates long 3,000+ char prompts in Cloudinary).
 
 ---
 
@@ -387,13 +391,14 @@ export async function reportPhysicalPrint(copies = 1): Promise<void> {
 - [ ] Run the **Section 0 Discovery Interview** (\`ask_question\` / \`/grill-me\`) to confirm eras/modes, reference plates, framing mode (\`ornate_frame\` vs \`logo_only\` vs \`unframed\`), UI assets, 2D/3D style, and camera/printer hardware before coding.
 - [ ] Load the relevant global skills from \`5dvr-photobooth-skills\` (Section 1).
 - [ ] Add \`VITE_DASHBOARD_URL\` and \`VITE_DASHBOARD_PROJECT_ID\` to \`.env.local\`.
-- [ ] Keep \`cloud-config.cache.json\` (from \`GET /settings\`) strictly separate from local \`operator-settings.json\` (\`F2\`).
+- [ ] Keep \`cloud-config.cache.json\` (from \`GET /settings\`) strictly separate from local \`operator-settings.json\` (\`F2\`), and remove any hardcoded API keys / Cloudinary secrets or legacy dashboard URLs from \`configService.ts\` and \`electron/main.cjs\`.
+- [ ] In \`F2\` (\`OperatorModal\`), replace editable AI model / API key / Cloudinary inputs with a **Read-Only Cloud Status Card** + **"Sync Cloud Config Now"** button while preserving all local camera, printer, padding, timer, \`previewMode\`, and OpenAI \`imageQuality\` controls.
 - [ ] Block new sessions when \`!cloudConfig.isActive\` or \`cloudConfig.currentGenerations >= cloudConfig.dailyLimit\`.
 - [ ] Implement the **7-Block Prompt Crafting Engine** with conditional safe-area rules matching the confirmed \`FramingMode\`.
 - [ ] Route AI synthesis dynamically using \`cloudConfig.aiModelProvider\` (\`'openai'\` vs \`'gemini'\`) and locked model \`cloudConfig.openaiModel\`.
-- [ ] Upload generated portraits to Cloudinary \`folder = cloudConfig.cloudinaryFolder\` with \`prompt_0, prompt_1, ...\` in \`context\`.
+- [ ] Upload generated portraits to Cloudinary \`folder = cloudConfig.cloudinaryFolder\` with \`tags = folder\` and \`prompt_0, prompt_1, ...\` chunked \`context\` in **both** \`electron/main.cjs\` IPC and \`cloudinaryService.ts\`.
 - [ ] Trigger \`reportPortraitGenerated()\` (non-blocking) after each live generated image and update in-memory \`isActive\` / \`currentGenerations\` / \`dailyLimit\`.
-- [ ] Trigger \`reportPhysicalPrint(copies)\` (non-blocking) whenever a physical print job is dispatched.
+- [ ] Trigger \`reportPhysicalPrint(copies)\` (non-blocking) inside the print-success flow whenever a physical print job is dispatched.
 `;
 }
 
