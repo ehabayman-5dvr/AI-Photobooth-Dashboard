@@ -1387,7 +1387,7 @@ export default function ProjectDetailPage() {
 
     if (isLoading || !project || !user) {
         return (
-            <div style={{ minHeight: '78vh', display: 'grid', placeItems: 'center' }}>
+            <div style={{ minHeight: '105vh', display: 'grid', placeItems: 'center' }}>
                 <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12 }}>
                     <Loader2 className="animate-spin" style={{ color: 'var(--pink)' }} size={36} />
                     <span className="lbl">Loading project…</span>

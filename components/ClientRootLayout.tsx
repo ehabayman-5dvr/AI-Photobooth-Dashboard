@@ -170,7 +170,7 @@ function LayoutContent({ children }: { children: React.ReactNode }) {
                 >
                     <div className="brand">
                         <img
-                            src="/5dvr-logo.png"
+                            src="/5dvr-logo-sm.png"
                             alt="5dVR"
                             width={40}
                             height={40}
@@ -246,7 +246,7 @@ function LayoutContent({ children }: { children: React.ReactNode }) {
                         aria-label="AI Photobooth, go to Overview"
                     >
                         <img
-                            src="/5dvr-logo.png"
+                            src="/5dvr-logo-sm.png"
                             alt="5dVR"
                             width={40}
                             height={40}
@@ -510,7 +510,7 @@ function LayoutContent({ children }: { children: React.ReactNode }) {
                             Powered by
                         </span>
                         <img
-                            src="/5dvr-logo.png"
+                            src="/5dvr-logo-sm.png"
                             alt="5dVR"
                             width={32}
                             height={32}
