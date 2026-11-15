@@ -16,6 +16,7 @@ import { supabase } from '@/utils/supabase';
 import Link from 'next/link';
 import { useSearchParams, useRouter } from 'next/navigation';
 import { useAuth } from '@/components/AuthContext';
+import { ModalDialog } from '@/components/ModalDialog';
 
 type FilterChipId = 'all' | 'use' | 'done';
 type SortMode = 'active' | 'newest' | 'most' | 'least' | 'name';
@@ -1163,32 +1164,17 @@ function ProjectsContent() {
             )}
 
             {/* New Project Modal ("Set up a booth") */}
-            {showModal && (
-                <div
-                    className="fadein"
-                    style={{
-                        position: 'fixed',
-                        inset: 0,
-                        background: 'rgba(5,5,7,.45)',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        padding: 24,
-                        zIndex: 10,
-                    }}
-                    onClick={e => {
-                        if (e.target === e.currentTarget) setShowModal(false);
-                    }}
-                >
+            <ModalDialog
+                open={showModal}
+                onClose={() => setShowModal(false)}
+                ariaLabelledBy="new-proj-h"
+                style={{ ['--dialog-max-w' as string]: '820px' }}
+            >
+                {showModal && (
                     <form
                         onSubmit={handleCreateProject}
-                        className="emerge"
-                        role="dialog"
-                        aria-modal="true"
-                        aria-labelledby="new-proj-h"
                         style={{
                             width: '100%',
-                            maxWidth: 820,
                             maxHeight: '90vh',
                             overflowY: 'auto',
                             boxSizing: 'border-box',
@@ -1646,8 +1632,8 @@ function ProjectsContent() {
                             </button>
                         </div>
                     </form>
-                </div>
-            )}
+                )}
+            </ModalDialog>
         </>
     );
 }

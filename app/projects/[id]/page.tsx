@@ -17,6 +17,8 @@ import {
     ProjectPlatformType,
 } from '@/types';
 import { supabase } from '@/utils/supabase';
+import { ModalDialog } from '@/components/ModalDialog';
+import { ToastPopover } from '@/components/ToastPopover';
 import {
     Trash2,
     Copy,
@@ -240,11 +242,20 @@ export default function ProjectDetailPage() {
     }, [id, user]);
 
     const switchTab = (tab: ProjectTab) => {
-        React.startTransition(() => {
-            setActiveTab(tab);
-            setSelectedIds([]);
-            setIsSelectionMode(false);
-        });
+        const applyTab = () => {
+            React.startTransition(() => {
+                setActiveTab(tab);
+                setSelectedIds([]);
+                setIsSelectionMode(false);
+            });
+        };
+        if (typeof document !== 'undefined' && 'startViewTransition' in document) {
+            (document as Document & { startViewTransition: (cb: () => void) => void }).startViewTransition(
+                applyTab
+            );
+        } else {
+            applyTab();
+        }
     };
 
     const fetchProjectData = async () => {
@@ -658,7 +669,12 @@ export default function ProjectDetailPage() {
             }
 
             const init: RequestInit | undefined =
-                priority === 'low' ? ({ priority: 'low' } as RequestInit) : undefined;
+                priority === 'low' || force
+                    ? ({
+                          ...(priority === 'low' ? { priority: 'low' } : {}),
+                          ...(force ? { cache: 'no-store' } : {}),
+                      } as RequestInit)
+                    : undefined;
             const response = await fetch(url, init);
             if (response.ok) {
                 const data = await response.json();
@@ -728,7 +744,12 @@ export default function ProjectDetailPage() {
             }
 
             const init: RequestInit | undefined =
-                priority === 'low' ? ({ priority: 'low' } as RequestInit) : undefined;
+                priority === 'low' || force
+                    ? ({
+                          ...(priority === 'low' ? { priority: 'low' } : {}),
+                          ...(force ? { cache: 'no-store' } : {}),
+                      } as RequestInit)
+                    : undefined;
             const response = await fetch(url, init);
             if (response.ok) {
                 const data = await response.json();
@@ -1595,17 +1616,9 @@ export default function ProjectDetailPage() {
 
             {/* ======================== OVERVIEW TAB ======================== */}
             {activeTab === 'overview' && (
-                <section
-                    className="ovgrid"
-                    style={{
-                        display: 'grid',
-                        gridTemplateColumns: 'minmax(0, 1.55fr) minmax(300px, 1fr)',
-                        gap: 20,
-                        alignItems: 'start',
-                    }}
-                >
+                <section className="ovgrid">
                     {/* Left Column */}
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 20, minWidth: 0 }}>
                         {/* Real-time Usage Card + Printed Copies Counter */}
                         <div className="card lift" style={{ padding: 28 }}>
                             <div
@@ -1634,7 +1647,7 @@ export default function ProjectDetailPage() {
                                                     fontSize: 56,
                                                     letterSpacing: '-.04em',
                                                     lineHeight: 0.92,
-                                                    color: 'var(--pink)',
+                                                    color: 'var(--pink-text)',
                                                 }}
                                             >
                                                 {project.currentGenerations.toLocaleString()}
@@ -1795,7 +1808,7 @@ export default function ProjectDetailPage() {
                                         fontSize: 28,
                                         letterSpacing: '-.03em',
                                         marginTop: 8,
-                                        color: 'var(--pink)',
+                                        color: 'var(--pink-text)',
                                     }}
                                 >
                                     {featuredImages.length}
@@ -1820,7 +1833,7 @@ export default function ProjectDetailPage() {
                             >
                                 <div>
                                     <span className="lbl">Portraits per day</span>
-                                    <h3
+                                    <h2
                                         style={{
                                             fontWeight: 800,
                                             fontSize: 22,
@@ -1840,7 +1853,7 @@ export default function ProjectDetailPage() {
                                                 ? `across ${barSeries.length} active days`
                                                 : `across ${barSeries.length} days`}
                                         </span>
-                                    </h3>
+                                    </h2>
                                 </div>
 
                                 <div
@@ -2003,7 +2016,7 @@ export default function ProjectDetailPage() {
                                                             fontSize: 12,
                                                             fontWeight: 700,
                                                             color: isPeak
-                                                                ? 'var(--pink)'
+                                                                ? 'var(--pink-text)'
                                                                 : d.count
                                                                   ? 'var(--ink)'
                                                                   : 'var(--muted)',
@@ -2089,10 +2102,10 @@ export default function ProjectDetailPage() {
                                     }}
                                 >
                                     <div>
-                                        <span className="lbl" style={{ color: 'var(--pink)' }}>
+                                        <span className="lbl" style={{ color: 'var(--pink-text)' }}>
                                             Admin · Booth setup
                                         </span>
-                                        <h3
+                                        <h2
                                             style={{
                                                 fontWeight: 700,
                                                 fontSize: 16,
@@ -2100,7 +2113,7 @@ export default function ProjectDetailPage() {
                                             }}
                                         >
                                             Limit, model &amp; cost
-                                        </h3>
+                                        </h2>
                                     </div>
                                     <button
                                         type="button"
@@ -2123,12 +2136,14 @@ export default function ProjectDetailPage() {
                                 >
                                     <div>
                                         <label
+                                            htmlFor="booth-limit-input"
                                             className="lbl"
                                             style={{ display: 'block', marginBottom: 6 }}
                                         >
                                             Portrait limit
                                         </label>
                                         <input
+                                            id="booth-limit-input"
                                             type="number"
                                             min={1}
                                             className="field"
@@ -2140,12 +2155,14 @@ export default function ProjectDetailPage() {
                                     </div>
                                     <div>
                                         <label
+                                            htmlFor="booth-refs-select"
                                             className="lbl"
                                             style={{ display: 'block', marginBottom: 6 }}
                                         >
                                             Reference images
                                         </label>
                                         <select
+                                            id="booth-refs-select"
                                             className="field"
                                             value={boothRefs}
                                             onChange={e =>
@@ -2161,12 +2178,14 @@ export default function ProjectDetailPage() {
 
                                 <div style={{ marginBottom: 14 }}>
                                     <label
+                                        htmlFor="booth-model-select"
                                         className="lbl"
                                         style={{ display: 'block', marginBottom: 6 }}
                                     >
                                         AI model
                                     </label>
                                     <select
+                                        id="booth-model-select"
                                         className="field"
                                         value={boothModelId}
                                         onChange={e => setBoothModelId(e.target.value)}
@@ -2220,7 +2239,7 @@ export default function ProjectDetailPage() {
                                                 fontWeight: 800,
                                                 fontSize: 18,
                                                 marginTop: 4,
-                                                color: 'var(--pink)',
+                                                color: 'var(--pink-text)',
                                             }}
                                         >
                                             $
@@ -2286,7 +2305,7 @@ export default function ProjectDetailPage() {
                         ) : (
                             <div className="card" style={{ padding: 24 }}>
                                 <span className="lbl">Booth setup</span>
-                                <h3
+                                <h2
                                     style={{
                                         fontWeight: 700,
                                         fontSize: 16,
@@ -2294,7 +2313,7 @@ export default function ProjectDetailPage() {
                                     }}
                                 >
                                     Active configuration
-                                </h3>
+                                </h2>
                                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                                     <span className="pill pill-muted">
                                         Limit {project.dailyLimit.toLocaleString()}
@@ -2332,9 +2351,9 @@ export default function ProjectDetailPage() {
                                     marginBottom: 14,
                                 }}
                             >
-                                <h3 style={{ fontWeight: 700, fontSize: 16, margin: 0 }}>
+                                <h2 style={{ fontWeight: 700, fontSize: 16, margin: 0 }}>
                                     Team members
-                                </h3>
+                                </h2>
                                 <span className="lbl">{members.length} assigned</span>
                             </div>
 
@@ -2449,6 +2468,7 @@ export default function ProjectDetailPage() {
                             {isAdmin && (
                                 <>
                                     <label
+                                        htmlFor="add-member-select"
                                         className="lbl"
                                         style={{ display: 'block', marginBottom: 6 }}
                                     >
@@ -2456,6 +2476,7 @@ export default function ProjectDetailPage() {
                                     </label>
                                     <div style={{ display: 'flex', gap: 8 }}>
                                         <select
+                                            id="add-member-select"
                                             className="field"
                                             value={selectedUserIdToAdd}
                                             onChange={e => setSelectedUserIdToAdd(e.target.value)}
@@ -2496,9 +2517,9 @@ export default function ProjectDetailPage() {
                                         marginBottom: 14,
                                     }}
                                 >
-                                    <h3 style={{ fontWeight: 700, fontSize: 16, margin: 0 }}>
+                                    <h2 style={{ fontWeight: 700, fontSize: 16, margin: 0 }}>
                                         Project settings
-                                    </h3>
+                                    </h2>
                                     <button
                                         type="button"
                                         className="btn"
@@ -2543,7 +2564,7 @@ export default function ProjectDetailPage() {
                                             style={{
                                                 fontWeight: 600,
                                                 marginTop: 3,
-                                                color: 'var(--pink)',
+                                                color: 'var(--pink-text)',
                                             }}
                                         >
                                             #{project.cloudinaryFolder || project.cloudinaryTag || 'Not set'}
@@ -2621,6 +2642,7 @@ export default function ProjectDetailPage() {
                             }}
                         >
                             <select
+                                aria-label="Filter by day"
                                 className="field"
                                 style={{ width: 'auto', padding: '9px 12px', fontSize: 12 }}
                                 value={dayFilter}
@@ -2644,6 +2666,7 @@ export default function ProjectDetailPage() {
                             </select>
 
                             <select
+                                aria-label="Sort order"
                                 className="field"
                                 style={{ width: 'auto', padding: '9px 12px', fontSize: 12 }}
                                 value={sortOrder}
@@ -4206,10 +4229,11 @@ export default function ProjectDetailPage() {
                             }}
                         >
                             <div>
-                                <label className="lbl" style={{ display: 'block', marginBottom: 6 }}>
+                                <label htmlFor="settings-daily-limit" className="lbl" style={{ display: 'block', marginBottom: 6 }}>
                                     Portrait limit
                                 </label>
                                 <input
+                                    id="settings-daily-limit"
                                     type="number"
                                     min={1}
                                     className="field"
@@ -4223,10 +4247,11 @@ export default function ProjectDetailPage() {
                                 />
                             </div>
                             <div>
-                                <label className="lbl" style={{ display: 'block', marginBottom: 6 }}>
+                                <label htmlFor="settings-ai-model" className="lbl" style={{ display: 'block', marginBottom: 6 }}>
                                     Active AI model (controlled from dashboard)
                                 </label>
                                 <select
+                                    id="settings-ai-model"
                                     className="field"
                                     value={settingsForm.aiModelId}
                                     onChange={e => {
@@ -4248,10 +4273,11 @@ export default function ProjectDetailPage() {
                                 </select>
                             </div>
                             <div>
-                                <label className="lbl" style={{ display: 'block', marginBottom: 6 }}>
+                                <label htmlFor="settings-ref-images" className="lbl" style={{ display: 'block', marginBottom: 6 }}>
                                     Reference images
                                 </label>
                                 <select
+                                    id="settings-ref-images"
                                     className="field"
                                     value={settingsForm.referenceImagesCount}
                                     onChange={e =>
@@ -4415,11 +4441,12 @@ export default function ProjectDetailPage() {
                             }}
                         >
                             <div>
-                                <label className="lbl" style={{ display: 'block', marginBottom: 6 }}>
+                                <label htmlFor="settings-cloudinary-account" className="lbl" style={{ display: 'block', marginBottom: 6 }}>
                                     Cloudinary account
                                 </label>
                                 {cloudinaryAccounts.length > 0 ? (
                                     <select
+                                        id="settings-cloudinary-account"
                                         className="field"
                                         value={settingsForm.cloudinaryAccountId}
                                         onChange={e => {
@@ -4563,35 +4590,24 @@ export default function ProjectDetailPage() {
             )}
 
             {/* ======================== PHOTO DETAILS RIGHT PANEL ======================== */}
-            {mounted &&
-                inspectImage &&
-                createPortal(
-                    <div
-                        className="fadein"
-                        onClick={() => setInspectImage(null)}
+            <ModalDialog
+                open={Boolean(inspectImage)}
+                onClose={() => setInspectImage(null)}
+                variant="drawer"
+                ariaLabel="Photo details"
+            >
+                {inspectImage && (
+                    <aside
                         style={{
-                            position: 'fixed',
-                            inset: 0,
-                            background: 'rgba(13,13,18,.55)',
-                            backdropFilter: 'blur(4px)',
-                            zIndex: 60,
+                            width: '100%',
+                            height: '100%',
+                            background: 'var(--pearl)',
+                            borderLeft: '1px solid var(--hair)',
                             display: 'flex',
-                            justifyContent: 'flex-end',
+                            flexDirection: 'column',
+                            overflow: 'hidden',
                         }}
                     >
-                        <aside
-                            className="slidein"
-                            onClick={e => e.stopPropagation()}
-                            style={{
-                                width: 'min(480px, 100vw)',
-                                height: '100%',
-                                background: 'var(--pearl)',
-                                borderLeft: '1px solid var(--hair)',
-                                display: 'flex',
-                                flexDirection: 'column',
-                                overflow: 'hidden',
-                            }}
-                        >
                             <div
                                 style={{
                                     padding: '18px 22px',
@@ -4618,6 +4634,7 @@ export default function ProjectDetailPage() {
                                         type="button"
                                         className="icon-btn"
                                         title="Previous"
+                                        aria-label="Previous portrait"
                                         disabled={inspectIndex <= 0}
                                         onClick={() => {
                                             if (inspectIndex > 0) {
@@ -4633,6 +4650,7 @@ export default function ProjectDetailPage() {
                                         type="button"
                                         className="icon-btn"
                                         title="Next"
+                                        aria-label="Next portrait"
                                         disabled={
                                             inspectIndex < 0 ||
                                             inspectIndex >= currentModalImageList.length - 1
@@ -4654,6 +4672,7 @@ export default function ProjectDetailPage() {
                                         type="button"
                                         className="icon-btn"
                                         title="Close"
+                                        aria-label="Close photo details"
                                         onClick={() => setInspectImage(null)}
                                     >
                                         ✕
@@ -4815,23 +4834,21 @@ export default function ProjectDetailPage() {
                                 )}
                             </div>
                         </aside>
-                    </div>,
-                    document.body
-                )}
+                    )}
+            </ModalDialog>
 
             {/* ======================== FULL VIEW LIGHTBOX ======================== */}
-            {mounted &&
-                lightboxImage &&
-                createPortal(
+            <ModalDialog
+                open={Boolean(lightboxImage)}
+                onClose={() => setLightboxImage(null)}
+                variant="lightbox"
+                ariaLabel="Portrait preview"
+            >
+                {lightboxImage && (
                     <div
-                        className="fadein"
-                        onClick={() => setLightboxImage(null)}
                         style={{
-                            position: 'fixed',
-                            inset: 0,
-                            background: 'rgba(5,5,7,.94)',
-                            backdropFilter: 'blur(8px)',
-                            zIndex: 70,
+                            width: '100%',
+                            height: '100%',
                             display: 'flex',
                             flexDirection: 'column',
                             color: '#fff',
@@ -4913,6 +4930,7 @@ export default function ProjectDetailPage() {
                                 <button
                                     type="button"
                                     className="lb-btn"
+                                    aria-label="Close preview"
                                     onClick={() => setLightboxImage(null)}
                                 >
                                     ✕
@@ -4935,6 +4953,7 @@ export default function ProjectDetailPage() {
                                     <button
                                         type="button"
                                         className="lb-btn"
+                                        aria-label="Previous portrait"
                                         onClick={e => {
                                             e.stopPropagation();
                                             setLightboxImage(
@@ -4977,6 +4996,7 @@ export default function ProjectDetailPage() {
                                         <button
                                             type="button"
                                             className="lb-btn"
+                                            aria-label="Next portrait"
                                             onClick={e => {
                                                 e.stopPropagation();
                                                 setLightboxImage(
@@ -4989,34 +5009,23 @@ export default function ProjectDetailPage() {
                                     )}
                             </div>
                         </div>
-                    </div>,
-                    document.body
+                    </div>
                 )}
+            </ModalDialog>
 
             {/* ======================== QR CODE MODAL ======================== */}
-            {mounted &&
-                qrModalImage &&
-                createPortal(
+            <ModalDialog
+                open={Boolean(qrModalImage)}
+                onClose={() => setQrModalImage(null)}
+                ariaLabel="Share QR code"
+                style={{ ['--dialog-max-w' as string]: '380px' }}
+            >
+                {qrModalImage && (
                     <div
-                        className="fadein"
-                        onClick={() => setQrModalImage(null)}
+                        className="card"
                         style={{
-                            position: 'fixed',
-                            inset: 0,
-                            background: 'rgba(13,13,18,.6)',
-                            backdropFilter: 'blur(4px)',
-                            zIndex: 80,
-                            display: 'grid',
-                            placeItems: 'center',
-                            padding: 20,
-                        }}
-                    >
-                        <div
-                            className="card zoomin"
-                            onClick={e => e.stopPropagation()}
-                            style={{
-                                width: 'min(380px, 100%)',
-                                padding: 26,
+                            width: '100%',
+                            padding: 26,
                                 textAlign: 'center',
                             }}
                         >
@@ -5068,33 +5077,21 @@ export default function ProjectDetailPage() {
                                 </button>
                             </div>
                         </div>
-                    </div>,
-                    document.body
                 )}
+            </ModalDialog>
 
             {/* ======================== 2-STEP DELETE PROJECT DIALOG ======================== */}
-            {mounted &&
-                deleteStep > 0 &&
-                createPortal(
+            <ModalDialog
+                open={deleteStep > 0}
+                onClose={() => setDeleteStep(0)}
+                ariaLabel="Delete project confirmation"
+                style={{ ['--dialog-max-w' as string]: '440px' }}
+            >
+                {deleteStep > 0 && (
                     <div
-                        className="fadein"
-                        onClick={() => setDeleteStep(0)}
-                        style={{
-                            position: 'fixed',
-                            inset: 0,
-                            background: 'rgba(13,13,18,.6)',
-                            backdropFilter: 'blur(4px)',
-                            zIndex: 85,
-                            display: 'grid',
-                            placeItems: 'center',
-                            padding: 20,
-                        }}
+                        className="card"
+                        style={{ width: '100%', padding: 26 }}
                     >
-                        <div
-                            className="card zoomin"
-                            onClick={e => e.stopPropagation()}
-                            style={{ width: 'min(440px, 100%)', padding: 26 }}
-                        >
                             <span className="lbl" style={{ color: '#C6283D' }}>
                                 Delete project · Step {deleteStep} of 2
                             </span>
@@ -5201,33 +5198,24 @@ export default function ProjectDetailPage() {
                                 </>
                             )}
                         </div>
-                    </div>,
-                    document.body
                 )}
+            </ModalDialog>
 
             {/* ======================== DELETE PORTRAIT(S) DIALOG ======================== */}
-            {mounted &&
-                deleteImageTargets.length > 0 &&
-                createPortal(
+            <ModalDialog
+                open={deleteImageTargets.length > 0}
+                onClose={() => {
+                    if (!isDeletingImages) setDeleteImageTargets([]);
+                }}
+                closeOnBackdrop={!isDeletingImages}
+                ariaLabel="Delete portrait confirmation"
+                style={{ ['--dialog-max-w' as string]: '420px' }}
+            >
+                {deleteImageTargets.length > 0 && (
                     <div
-                        className="fadein"
-                        onClick={() => !isDeletingImages && setDeleteImageTargets([])}
-                        style={{
-                            position: 'fixed',
-                            inset: 0,
-                            background: 'rgba(13,13,18,.6)',
-                            backdropFilter: 'blur(4px)',
-                            zIndex: 88,
-                            display: 'grid',
-                            placeItems: 'center',
-                            padding: 20,
-                        }}
+                        className="card"
+                        style={{ width: '100%', padding: 26, gap: 14 }}
                     >
-                        <div
-                            className="card zoomin"
-                            onClick={e => e.stopPropagation()}
-                            style={{ width: 'min(420px, 100%)', padding: 26, gap: 14 }}
-                        >
                             <span className="lbl" style={{ color: '#C6283D' }}>
                                 Cloudinary · Permanent deletion
                             </span>
@@ -5335,61 +5323,26 @@ export default function ProjectDetailPage() {
                                 </button>
                             </div>
                         </div>
-                    </div>,
-                    document.body
                 )}
+            </ModalDialog>
 
             {/* ======================== TOAST ======================== */}
-            {mounted &&
-                toastState &&
-                createPortal(
-                    <div
-                        className="toastin"
-                        style={{
-                            position: 'fixed',
-                            bottom: 24,
-                            left: '50%',
-                            transform: 'translateX(-50%)',
-                            background: 'var(--void)',
-                            color: '#fff',
-                            padding: '10px 16px',
-                            borderRadius: 99,
-                            fontSize: 13,
-                            fontWeight: 600,
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: 12,
-                            boxShadow: '0 18px 40px rgba(0,0,0,.35)',
-                            zIndex: 90,
-                        }}
-                    >
-                        <span>{toastState.message}</span>
-                        {toastState.img && (
-                            <button
-                                type="button"
-                                onClick={() => {
-                                    const target = toastState.img;
-                                    if (!target) return;
-                                    setToastState(null);
-                                    handleToggleTag(target, false);
-                                }}
-                                style={{
-                                    background: 'transparent',
-                                    border: 0,
-                                    color: 'var(--pink)',
-                                    fontWeight: 800,
-                                    fontSize: 12,
-                                    cursor: 'pointer',
-                                    letterSpacing: '.06em',
-                                    textTransform: 'uppercase',
-                                }}
-                            >
-                                UNDO
-                            </button>
-                        )}
-                    </div>,
-                    document.body
-                )}
+            <ToastPopover
+                open={Boolean(toastState)}
+                message={toastState?.message || ''}
+                onDismiss={() => setToastState(null)}
+                actionLabel={toastState?.img ? 'Undo' : undefined}
+                onAction={
+                    toastState?.img
+                        ? () => {
+                              const target = toastState.img;
+                              if (!target) return;
+                              setToastState(null);
+                              handleToggleTag(target, false);
+                          }
+                        : undefined
+                }
+            />
         </>
     );
 }

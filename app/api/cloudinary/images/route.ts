@@ -52,11 +52,18 @@ export async function GET(request: NextRequest) {
             .next_cursor(nextCursor || undefined)
             .execute();
 
-        return NextResponse.json({
-            resources: result.resources,
-            next_cursor: result.next_cursor,
-            cloudName: creds.cloudName,
-        });
+        return NextResponse.json(
+            {
+                resources: result.resources,
+                next_cursor: result.next_cursor,
+                cloudName: creds.cloudName,
+            },
+            {
+                headers: {
+                    'Cache-Control': 'private, max-age=30, stale-while-revalidate=60',
+                },
+            }
+        );
     } catch (error: any) {
         console.error('Cloudinary API Error:', error);
         return NextResponse.json(

@@ -1,7 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { createPortal } from 'react-dom';
+import React, { useState, useEffect, useRef, useId, useCallback } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { UserRole } from '@/types';
@@ -29,13 +28,11 @@ function LayoutContent({ children }: { children: React.ReactNode }) {
     // Separate desktop rail state (default true = 88px rail) and mobile dropdown state (default false)
     const [navMini, setNavMini] = useState(true);
     const [mobileOpen, setMobileOpen] = useState(false);
-    const [isMobileViewport, setIsMobileViewport] = useState(false);
 
     // Profile popover / logout menu state
     const [profileMenuOpen, setProfileMenuOpen] = useState(false);
     const [isLoggingOut, setIsLoggingOut] = useState(false);
-    const [menuStyle, setMenuStyle] = useState<React.CSSProperties>({});
-    const meBtnRef = useRef<HTMLButtonElement | null>(null);
+    const profileMenuId = useId();
     const menuRef = useRef<HTMLDivElement | null>(null);
 
     // Interactive cursor glow ref (updates CSS vars directly without React re-renders)
@@ -48,82 +45,23 @@ function LayoutContent({ children }: { children: React.ReactNode }) {
     const router = useRouter();
 
     useEffect(() => {
-        const mql = window.matchMedia('(max-width: 900px)');
-        const updateViewport = () => setIsMobileViewport(mql.matches);
-        updateViewport();
-        mql.addEventListener('change', updateViewport);
-        return () => mql.removeEventListener('change', updateViewport);
-    }, []);
-
-    useEffect(() => {
         setMobileOpen(false);
-        setProfileMenuOpen(false);
+        const menuEl = menuRef.current as (HTMLDivElement & { hidePopover?: () => void }) | null;
+        if (menuEl?.matches(':popover-open')) {
+            menuEl.hidePopover?.();
+        }
     }, [pathname]);
 
-    const updateProfileMenuPosition = useCallback(() => {
-        const btn = meBtnRef.current;
-        if (!btn) return;
-        const rect = btn.getBoundingClientRect();
-
-        if (isMobileViewport) {
-            const width = Math.min(Math.max(rect.width, 220), window.innerWidth - 32);
-            setMenuStyle({
-                position: 'fixed',
-                left: Math.max(16, Math.min(rect.left, window.innerWidth - width - 16)),
-                top: rect.bottom + 8,
-                width,
-            });
-        } else if (navMini) {
-            setMenuStyle({
-                position: 'fixed',
-                left: rect.right + 14,
-                bottom: Math.max(16, window.innerHeight - rect.bottom),
-                minWidth: 228,
-            });
-        } else {
-            setMenuStyle({
-                position: 'fixed',
-                left: rect.left,
-                bottom: Math.max(16, window.innerHeight - rect.top + 8),
-                width: Math.max(rect.width, 216),
-            });
-        }
-    }, [isMobileViewport, navMini]);
-
     useEffect(() => {
-        if (!profileMenuOpen) return;
-        updateProfileMenuPosition();
-
-        const handleOutsideClick = (e: MouseEvent) => {
-            const target = e.target as Node;
-            if (
-                meBtnRef.current?.contains(target) ||
-                menuRef.current?.contains(target)
-            ) {
-                return;
-            }
-            setProfileMenuOpen(false);
+        const menuEl = menuRef.current;
+        if (!menuEl) return;
+        const handleToggle = (e: Event) => {
+            const toggleEvent = e as Event & { newState?: string };
+            setProfileMenuOpen(toggleEvent.newState === 'open');
         };
-
-        const handleKeyDown = (e: KeyboardEvent) => {
-            if (e.key === 'Escape') {
-                setProfileMenuOpen(false);
-                meBtnRef.current?.focus();
-            }
-        };
-
-        window.addEventListener('mousedown', handleOutsideClick);
-        window.addEventListener('keydown', handleKeyDown);
-        window.addEventListener('resize', updateProfileMenuPosition);
-        window.addEventListener('scroll', updateProfileMenuPosition, true);
-
-        return () => {
-            window.removeEventListener('mousedown', handleOutsideClick);
-            window.removeEventListener('keydown', handleKeyDown);
-            window.removeEventListener('resize', updateProfileMenuPosition);
-            window.removeEventListener('scroll', updateProfileMenuPosition, true);
-        };
-    }, [profileMenuOpen, updateProfileMenuPosition]);
+        menuEl.addEventListener('toggle', handleToggle);
+        return () => menuEl.removeEventListener('toggle', handleToggle);
+    }, []);
 
     useEffect(() => {
         if (!loading && !isAuthenticated && pathname !== '/login') {
@@ -159,9 +97,7 @@ function LayoutContent({ children }: { children: React.ReactNode }) {
     }, []);
 
     const toggleNav = () => {
-        const isMobile = typeof window !== 'undefined' && window.matchMedia('(max-width: 900px)').matches;
-        setIsMobileViewport(isMobile);
-        if (isMobile) {
+        if (typeof window !== 'undefined' && window.innerWidth <= 900) {
             setMobileOpen(prev => !prev);
         } else {
             setNavMini(prev => !prev);
@@ -273,20 +209,10 @@ function LayoutContent({ children }: { children: React.ReactNode }) {
     const roleLabel = isAdmin ? 'Super admin' : 'Regular user';
     const userInitials = getInitials(user.name || user.email);
 
-    // Build sidebar class based on viewport and state
-    const sideClass = isMobileViewport
-        ? `side${mobileOpen ? ' open' : ''}`
-        : `side${navMini ? ' mini' : ' open'}`;
-
-    const navLabel = isMobileViewport
-        ? mobileOpen
-            ? 'Close menu'
-            : 'Open menu'
-        : navMini
-            ? 'Expand menu'
-            : 'Collapse menu';
-
-    const navExpanded = isMobileViewport ? mobileOpen : !navMini;
+    // Build sidebar class based on CSS media queries (no JS viewport state)
+    const sideClass = `side${mobileOpen ? ' mobile-open' : ''}${navMini ? ' mini' : ' open'}`;
+    const navLabel = mobileOpen || !navMini ? 'Toggle navigation' : 'Expand menu';
+    const navExpanded = mobileOpen || !navMini;
 
     const isOverviewActive = pathname === '/';
     const isProjectsActive = pathname.startsWith('/projects');
@@ -442,16 +368,12 @@ function LayoutContent({ children }: { children: React.ReactNode }) {
 
                 <div className="sidefoot">
                     <button
-                        ref={meBtnRef}
                         type="button"
                         className="me"
                         title={`${user.name} · ${roleLabel}`}
-                        aria-haspopup="menu"
+                        popoverTarget={profileMenuId}
                         aria-expanded={profileMenuOpen}
-                        onClick={() => {
-                            if (!profileMenuOpen) updateProfileMenuPosition();
-                            setProfileMenuOpen(prev => !prev);
-                        }}
+                        aria-controls={profileMenuId}
                     >
                         <span className="me-av" aria-hidden="true">
                             {userInitials}
@@ -482,82 +404,77 @@ function LayoutContent({ children }: { children: React.ReactNode }) {
                     </button>
                 </div>
 
-                {profileMenuOpen &&
-                    typeof document !== 'undefined' &&
-                    createPortal(
-                        <div
-                            ref={menuRef}
-                            className="me-menu"
-                            role="menu"
-                            aria-label="Account menu"
-                            style={menuStyle}
+                <div
+                    id={profileMenuId}
+                    ref={menuRef}
+                    popover="auto"
+                    data-placement={!navMini ? 'above' : undefined}
+                    className="me-menu"
+                    aria-label="Account actions"
+                >
+                    <div className="me-menu-head">
+                        <span
+                            style={{
+                                fontSize: 13,
+                                fontWeight: 700,
+                                color: '#050507',
+                                whiteSpace: 'nowrap',
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
+                            }}
                         >
-                            <div className="me-menu-head">
-                                <span
-                                    style={{
-                                        fontSize: 13,
-                                        fontWeight: 700,
-                                        color: '#050507',
-                                        whiteSpace: 'nowrap',
-                                        overflow: 'hidden',
-                                        textOverflow: 'ellipsis',
-                                    }}
-                                >
-                                    {user.name}
-                                </span>
-                                <span
-                                    style={{
-                                        fontSize: 11,
-                                        color: '#5C5C66',
-                                        whiteSpace: 'nowrap',
-                                        overflow: 'hidden',
-                                        textOverflow: 'ellipsis',
-                                    }}
-                                >
-                                    {user.email}
-                                </span>
-                                <span
-                                    className="lbl"
-                                    style={{
-                                        marginTop: 4,
-                                        fontSize: 9,
-                                        letterSpacing: '.2em',
-                                        color: isAdmin ? '#FF0066' : '#5C5C66',
-                                    }}
-                                >
-                                    {roleLabel}
-                                </span>
-                            </div>
-                            <button
-                                type="button"
-                                role="menuitem"
-                                className="me-logout"
-                                disabled={isLoggingOut}
-                                onClick={async () => {
-                                    setIsLoggingOut(true);
-                                    await logout();
-                                }}
-                            >
-                                <svg
-                                    aria-hidden="true"
-                                    width="16"
-                                    height="16"
-                                    viewBox="0 0 24 24"
-                                    fill="none"
-                                    stroke="currentColor"
-                                    strokeWidth="2"
-                                    strokeLinecap="round"
-                                    strokeLinejoin="round"
-                                >
-                                    <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
-                                    <polyline points="16 17 21 12 16 7"></polyline>
-                                    <line x1="21" y1="12" x2="9" y2="12"></line>
-                                </svg>
-                                {isLoggingOut ? 'Logging out…' : 'Log out'}
-                            </button>
-                        </div>,
-                        document.body
-                    )}
+                            {user.name}
+                        </span>
+                        <span
+                            style={{
+                                fontSize: 11,
+                                color: '#5C5C66',
+                                whiteSpace: 'nowrap',
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
+                            }}
+                        >
+                            {user.email}
+                        </span>
+                        <span
+                            className="lbl"
+                            style={{
+                                marginTop: 4,
+                                fontSize: 9,
+                                letterSpacing: '.2em',
+                                color: isAdmin ? 'var(--pink-text)' : '#5C5C66',
+                            }}
+                        >
+                            {roleLabel}
+                        </span>
+                    </div>
+                    <button
+                        type="button"
+                        className="me-logout"
+                        disabled={isLoggingOut}
+                        onClick={async () => {
+                            setIsLoggingOut(true);
+                            await logout();
+                        }}
+                    >
+                        <svg
+                            aria-hidden="true"
+                            width="16"
+                            height="16"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                        >
+                            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+                            <polyline points="16 17 21 12 16 7"></polyline>
+                            <line x1="21" y1="12" x2="9" y2="12"></line>
+                        </svg>
+                        {isLoggingOut ? 'Logging out…' : 'Log out'}
+                    </button>
+                </div>
             </aside>
 
             <main

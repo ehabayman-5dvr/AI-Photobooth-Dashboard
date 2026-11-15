@@ -11,6 +11,8 @@ import {
     AiProvider,
 } from '@/types';
 import { supabase } from '@/utils/supabase';
+import { ModalDialog } from '@/components/ModalDialog';
+import { ToastPopover } from '@/components/ToastPopover';
 
 interface AccountFormState {
     label: string;
@@ -2059,29 +2061,19 @@ export default function SettingsPage() {
             )}
 
             {/* Delete Cloudinary Account Confirmation Dialog */}
-            {deleteTargetAccount && (
-                <div
-                    className="fadein"
-                    onClick={() => !isDeletingAccount && setDeleteTargetAccount(null)}
-                    style={{
-                        position: 'fixed',
-                        inset: 0,
-                        background: 'rgba(5,5,7,.45)',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        padding: 24,
-                        zIndex: 20,
-                    }}
-                >
+            <ModalDialog
+                open={Boolean(deleteTargetAccount)}
+                onClose={() => {
+                    if (!isDeletingAccount) setDeleteTargetAccount(null);
+                }}
+                closeOnBackdrop={!isDeletingAccount}
+                ariaLabel="Remove Cloudinary account"
+                style={{ ['--dialog-max-w' as string]: '440px' }}
+            >
+                {deleteTargetAccount && (
                     <div
-                        className="emerge"
-                        role="dialog"
-                        aria-modal="true"
-                        onClick={e => e.stopPropagation()}
                         style={{
                             width: '100%',
-                            maxWidth: 440,
                             background: '#F7F5F2',
                             borderRadius: 4,
                             padding: 28,
@@ -2127,33 +2119,23 @@ export default function SettingsPage() {
                             </button>
                         </div>
                     </div>
-                </div>
-            )}
+                )}
+            </ModalDialog>
 
             {/* Delete AI Model Confirmation Dialog */}
-            {deleteTargetModel && (
-                <div
-                    className="fadein"
-                    onClick={() => !isDeletingModel && setDeleteTargetModel(null)}
-                    style={{
-                        position: 'fixed',
-                        inset: 0,
-                        background: 'rgba(5,5,7,.45)',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        padding: 24,
-                        zIndex: 20,
-                    }}
-                >
+            <ModalDialog
+                open={Boolean(deleteTargetModel)}
+                onClose={() => {
+                    if (!isDeletingModel) setDeleteTargetModel(null);
+                }}
+                closeOnBackdrop={!isDeletingModel}
+                ariaLabel="Remove AI model"
+                style={{ ['--dialog-max-w' as string]: '440px' }}
+            >
+                {deleteTargetModel && (
                     <div
-                        className="emerge"
-                        role="dialog"
-                        aria-modal="true"
-                        onClick={e => e.stopPropagation()}
                         style={{
                             width: '100%',
-                            maxWidth: 440,
                             background: '#F7F5F2',
                             borderRadius: 4,
                             padding: 28,
@@ -2198,30 +2180,14 @@ export default function SettingsPage() {
                             </button>
                         </div>
                     </div>
-                </div>
-            )}
+                )}
+            </ModalDialog>
 
-            {toast && (
-                <div
-                    className="toast"
-                    role="status"
-                    style={{
-                        position: 'fixed',
-                        bottom: 32,
-                        left: '50%',
-                        transform: 'translateX(-50%)',
-                        padding: '14px 20px',
-                        background: '#050507',
-                        color: '#F7F5F2',
-                        borderRadius: 4,
-                        fontSize: 14,
-                        fontWeight: 500,
-                        zIndex: 30,
-                    }}
-                >
-                    {toast}
-                </div>
-            )}
+            <ToastPopover
+                open={Boolean(toast)}
+                message={toast || ''}
+                onDismiss={() => setToast(null)}
+            />
         </div>
     );
 }

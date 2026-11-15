@@ -11,6 +11,7 @@
     --muted: #5C5C66;
     --mist: #8C8C96;
     --pink: #FF0066;
+    --pink-text: #C70050;
     --pink-soft: #FF80B3;
     --pink-tint: #FFE8F1;
     --pink-wash: #FFF0F6;
@@ -1146,9 +1147,6 @@ tbody tr:hover td:first-child {
     display: flex;
     flex-direction: column;
     gap: 40px;
-    transition: flex-basis 0.35s cubic-bezier(0.16, 1, 0.3, 1),
-        max-width 0.35s cubic-bezier(0.16, 1, 0.3, 1),
-        padding 0.35s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .brandwrap {
@@ -1218,12 +1216,38 @@ tbody tr:hover td:first-child {
     border: 1px solid #E3DFD8;
     border-radius: 8px;
     padding: 6px;
+    min-width: 228px;
     box-shadow: 0 20px 44px -16px rgba(5, 5, 7, 0.28), 0 0 0 1px rgba(5, 5, 7, 0.04);
-    z-index: 9999;
-    display: flex;
     flex-direction: column;
     gap: 4px;
-    animation: emerge 0.2s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.me-menu:popover-open {
+    display: flex;
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    transition: opacity 0.18s cubic-bezier(0.16, 1, 0.3, 1), transform 0.18s cubic-bezier(0.16, 1, 0.3, 1), display 0.18s allow-discrete, overlay 0.18s allow-discrete;
+}
+@starting-style {
+    .me-menu:popover-open {
+        opacity: 0;
+        transform: translateY(4px) scale(0.98);
+    }
+}
+@supports (position-area: block-end) {
+    .me-menu[popover] {
+        inset: auto;
+        margin: 0;
+        position-area: inline-end span-block-start;
+        position-try-fallbacks: flip-block, flip-inline, flip-block flip-inline;
+    }
+    .me-menu[popover][data-placement='above'] {
+        position-area: block-start span-inline-end;
+    }
+    @media (max-width: 900px) {
+        .me-menu[popover] {
+            position-area: block-end span-inline-start;
+        }
+    }
 }
 .me-menu-head {
     padding: 10px 12px;
@@ -1356,7 +1380,7 @@ tbody tr:hover td:first-child {
     .sidenav {
         display: none !important;
     }
-    .side.open .sidenav {
+    .side.mobile-open .sidenav {
         display: flex !important;
         flex-direction: column !important;
         flex: 1 1 100%;
@@ -1365,16 +1389,16 @@ tbody tr:hover td:first-child {
         padding-top: 8px;
         animation: navdown 0.35s cubic-bezier(0.16, 1, 0.3, 1) both;
     }
-    .side.open .sidenav .nav {
+    .side.mobile-open .sidenav .nav {
         white-space: normal;
     }
-    .side.open .sidenav .nav.on {
+    .side.mobile-open .sidenav .nav.on {
         box-shadow: inset 3px 0 0 #FF0066;
     }
     .sidefoot {
         display: none !important;
     }
-    .side.open .sidefoot {
+    .side.mobile-open .sidefoot {
         display: flex !important;
         flex: 1 1 100%;
         margin-top: 4px;
@@ -1382,18 +1406,18 @@ tbody tr:hover td:first-child {
         border-top: 1px solid #E3DFD8;
         animation: navdown 0.35s cubic-bezier(0.16, 1, 0.3, 1) 0.05s both;
     }
-    .side.open .hamb {
+    .side.mobile-open .hamb {
         border-color: #FF0066;
         background: #FFE8F1;
     }
-    .side.open .hamb span:nth-child(1) {
+    .side.mobile-open .hamb span:nth-child(1) {
         transform: translateY(7px) rotate(45deg);
     }
-    .side.open .hamb span:nth-child(2) {
+    .side.mobile-open .hamb span:nth-child(2) {
         opacity: 0;
         transform: scaleX(0.2);
     }
-    .side.open .hamb span:nth-child(3) {
+    .side.mobile-open .hamb span:nth-child(3) {
         transform: translateY(-7px) rotate(-45deg);
     }
     main.app-main {
@@ -1583,5 +1607,231 @@ tbody tr:hover td:first-child {
     }
     *:has(> .rtable) {
         overflow: visible !important;
+    }
+}
+
+.ovgrid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 20px;
+    align-items: start;
+}
+.ovgrid > * {
+    min-width: 0;
+}
+@media (min-width: 900px) {
+    .ovgrid {
+        grid-template-columns: minmax(0, 1.55fr) minmax(300px, 1fr);
+    }
+}
+@media (max-width: 900px) {
+    .tabs {
+        overflow-x: auto;
+        scrollbar-width: none;
+        max-width: 100%;
+    }
+    .tabs::-webkit-scrollbar {
+        display: none;
+    }
+}
+
+dialog.native-dialog {
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: inherit;
+    max-width: none;
+    max-height: none;
+    overflow: visible;
+    opacity: 0;
+    transition-property: opacity, transform, display, overlay;
+    transition-duration: 0.22s;
+    transition-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+    transition-behavior: allow-discrete;
+}
+dialog.native-dialog::backdrop {
+    background-color: rgba(5, 5, 7, 0);
+    backdrop-filter: blur(4px);
+    transition-property: background-color, display, overlay;
+    transition-duration: 0.22s;
+    transition-timing-function: ease-out;
+    transition-behavior: allow-discrete;
+}
+dialog.native-dialog-modal {
+    margin: auto;
+    width: min(100% - 32px, var(--dialog-max-w, 520px));
+    max-height: calc(100dvh - 32px);
+}
+dialog.native-dialog-drawer {
+    margin: 0 0 0 auto;
+    width: min(480px, 100vw);
+    height: 100dvh;
+}
+dialog.native-dialog-lightbox {
+    margin: 0;
+    width: 100vw;
+    height: 100dvh;
+}
+@media (prefers-reduced-motion: no-preference) {
+    dialog.native-dialog-modal,
+    dialog.native-dialog-lightbox {
+        transform: scale(0.97);
+    }
+    dialog.native-dialog-drawer {
+        transform: translateX(24px);
+    }
+}
+dialog.native-dialog[open]:where(:not([data-closing])) {
+    opacity: 1;
+}
+dialog.native-dialog[open]:where(:not([data-closing]))::backdrop {
+    background-color: rgba(5, 5, 7, 0.52);
+}
+dialog.native-dialog-lightbox[open]:where(:not([data-closing]))::backdrop {
+    background-color: rgba(10, 10, 14, 0.92);
+}
+@starting-style {
+    dialog.native-dialog[open]:where(:not([data-closing])) {
+        opacity: 0;
+    }
+    dialog.native-dialog[open]:where(:not([data-closing]))::backdrop {
+        background-color: rgba(5, 5, 7, 0);
+    }
+}
+@media (prefers-reduced-motion: no-preference) {
+    dialog.native-dialog[open]:where(:not([data-closing])) {
+        transform: none;
+    }
+    @starting-style {
+        dialog.native-dialog-modal[open]:where(:not([data-closing])),
+        dialog.native-dialog-lightbox[open]:where(:not([data-closing])) {
+            transform: scale(0.97);
+        }
+        dialog.native-dialog-drawer[open]:where(:not([data-closing])) {
+            transform: translateX(24px);
+        }
+    }
+}
+@media (prefers-reduced-motion: reduce) {
+    dialog.native-dialog,
+    dialog.native-dialog::backdrop {
+        transition-duration: 0.1s;
+    }
+}
+
+.toast-popover {
+    inset: auto 16px 24px auto;
+    margin: 0 auto;
+    left: 50%;
+    transform: translateX(-50%) translateY(8px);
+    background: var(--void);
+    color: #fff;
+    border: 0;
+    padding: 10px 16px;
+    border-radius: 99px;
+    font-size: 13px;
+    font-weight: 600;
+    align-items: center;
+    gap: 12px;
+    max-width: min(92vw, 480px);
+    box-shadow: 0 18px 40px rgba(0, 0, 0, 0.35);
+    opacity: 0;
+    transition-property: opacity, transform, display, overlay;
+    transition-duration: 0.22s;
+    transition-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+    transition-behavior: allow-discrete;
+}
+.toast-popover:popover-open {
+    display: flex;
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+}
+@starting-style {
+    .toast-popover:popover-open {
+        opacity: 0;
+        transform: translateX(-50%) translateY(8px);
+    }
+}
+.toast-popover-action {
+    background: transparent;
+    border: 0;
+    color: var(--pink-soft);
+    font-weight: 800;
+    font-size: 12px;
+    cursor: pointer;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 4px 6px;
+}
+.toast-popover-close {
+    background: transparent;
+    border: 0;
+    color: rgba(255, 255, 255, 0.72);
+    font-size: 12px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 4px;
+    border-radius: 4px;
+}
+.toast-popover-close:hover {
+    color: #fff;
+}
+@media (prefers-reduced-motion: reduce) {
+    .toast-popover {
+        transition-duration: 0.1s;
+        transform: translateX(-50%);
+    }
+    .toast-popover:popover-open {
+        transform: translateX(-50%);
+    }
+    ::view-transition-group(*),
+    ::view-transition-old(*),
+    ::view-transition-new(*) {
+        animation: none !important;
+    }
+}
+
+/* Phase 4: Modern CSS Forms, Typography, Scrollbars */
+html {
+    --scrollbar-thumb: #8C8C96;
+    --scrollbar-track: transparent;
+    scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+    scrollbar-width: thin;
+}
+@supports not (scrollbar-color: auto) {
+    html::-webkit-scrollbar {
+        width: 8px;
+        height: 8px;
+    }
+    html::-webkit-scrollbar-thumb {
+        background: var(--scrollbar-thumb);
+        border-radius: 4px;
+    }
+    html::-webkit-scrollbar-track {
+        background: var(--scrollbar-track);
+    }
+}
+
+body {
+    accent-color: var(--pink);
+}
+
+h1,
+h2,
+h3 {
+    text-wrap: balance;
+}
+p {
+    text-wrap: pretty;
+}
+
+.field:user-invalid {
+    border-color: var(--danger);
+}
+
+@supports (field-sizing: content) {
+    textarea.field {
+        field-sizing: content;
+        min-height: 76px;
     }
 }

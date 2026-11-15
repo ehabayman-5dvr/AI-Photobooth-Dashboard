@@ -5,6 +5,8 @@ import { UserRole, Project } from '@/types';
 import { useAuth } from '@/components/AuthContext';
 import { supabase } from '@/utils/supabase';
 import { useRouter } from 'next/navigation';
+import { ModalDialog } from '@/components/ModalDialog';
+import { ToastPopover } from '@/components/ToastPopover';
 
 type PeopleFilter = 'all' | 'admin' | 'regular' | 'invited';
 
@@ -754,28 +756,19 @@ export default function UserManagementPage() {
             </section>
 
             {/* Remove Access Confirmation Dialog */}
-            {removeTarget && (
-                <div
-                    className="fadein"
-                    style={{
-                        position: 'fixed',
-                        inset: 0,
-                        background: 'rgba(5,5,7,.45)',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        padding: 24,
-                        zIndex: 10,
-                    }}
-                >
+            <ModalDialog
+                open={Boolean(removeTarget)}
+                onClose={() => {
+                    if (!isRemoving) setRemoveTarget(null);
+                }}
+                closeOnBackdrop={!isRemoving}
+                ariaLabelledBy="rm-h"
+                style={{ ['--dialog-max-w' as string]: '480px' }}
+            >
+                {removeTarget && (
                     <div
-                        className="emerge"
-                        role="dialog"
-                        aria-modal="true"
-                        aria-labelledby="rm-h"
                         style={{
                             width: '100%',
-                            maxWidth: 480,
                             background: '#F7F5F2',
                             borderRadius: 4,
                             padding: 28,
@@ -815,35 +808,26 @@ export default function UserManagementPage() {
                             </button>
                         </div>
                     </div>
-                </div>
-            )}
+                )}
+            </ModalDialog>
 
             {/* Invite a Person Dialog */}
-            {inviting && (
-                <div
-                    className="fadein"
-                    style={{
-                        position: 'fixed',
-                        inset: 0,
-                        background: 'rgba(5,5,7,.45)',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        padding: 24,
-                        zIndex: 10,
-                    }}
-                >
+            <ModalDialog
+                open={inviting}
+                onClose={() => {
+                    if (!isSendingInvite) setInviting(false);
+                }}
+                closeOnBackdrop={!isSendingInvite}
+                ariaLabelledBy="inv-h"
+                style={{ ['--dialog-max-w' as string]: '520px' }}
+            >
+                {inviting && (
                     <div
-                        className="emerge"
-                        role="dialog"
-                        aria-modal="true"
-                        aria-labelledby="inv-h"
                         style={{
                             maxHeight: '90vh',
                             overflowY: 'auto',
                             boxSizing: 'border-box',
                             width: '100%',
-                            maxWidth: 520,
                             background: '#F7F5F2',
                             borderRadius: 4,
                             padding: 28,
@@ -1208,30 +1192,14 @@ export default function UserManagementPage() {
                             </button>
                         </div>
                     </div>
-                </div>
-            )}
+                )}
+            </ModalDialog>
 
-            {toast && (
-                <div
-                    className="toast"
-                    role="status"
-                    style={{
-                        position: 'fixed',
-                        bottom: 32,
-                        left: '50%',
-                        transform: 'translateX(-50%)',
-                        padding: '14px 20px',
-                        background: '#050507',
-                        color: '#F7F5F2',
-                        borderRadius: 4,
-                        fontSize: 14,
-                        fontWeight: 500,
-                        zIndex: 11,
-                    }}
-                >
-                    {toast}
-                </div>
-            )}
+            <ToastPopover
+                open={Boolean(toast)}
+                message={toast || ''}
+                onDismiss={() => setToast(null)}
+            />
         </>
     );
 }
