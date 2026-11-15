@@ -89,3 +89,21 @@ This file defines the architecture, conventions, and rules for agents and develo
   1. **Performance & Core Web Vitals (`LCP`, `INP`, `CLS`)**: Serve Cloudinary thumbnails with `f_auto,q_auto` and responsive widths; prioritize above-the-fold hero/first-row images (`fetchPriority="high"`) while lazy-loading off-screen assets (`loading="lazy"`, `decoding="async"`, `content-visibility: auto`); parallelize independent Supabase queries (`Promise.all`) and avoid synchronous layout reads (`getBoundingClientRect()`) in pointer/scroll handlers.
   2. **Native Top-Layer Overlays & Accessibility**: Use native `<dialog>` (`.showModal()`) for modal dialogs, drawers, and lightboxes, and native `Popover` (`popover="auto"` / `"manual"`) + CSS Anchor Positioning for menus, pickers, and toasts instead of custom `position: fixed` `<div>` portals and manual coordinate math.
   3. **CSS-First Interactions & Motion**: Prefer CSS `@container` / `@media` queries over `window.matchMedia` React state, animate composite-friendly properties (`transform`, `opacity`), and respect `@media (prefers-reduced-motion: reduce)`.
+
+---
+
+## 7. UI Architecture Checkpoint & Reusable Primitives
+
+All new features added to this repository should build on these established patterns:
+
+- **Top-Layer Dialogs (`components/ModalDialog.tsx`)**: Use `<ModalDialog>` (`variant="modal" | "drawer" | "lightbox"`) for all modal overlays. It manages `.showModal()`, `closedby="any"` (with a `getBoundingClientRect()` backdrop-click fallback for Safari), `@starting-style` entry animations, and a `data-closing` exit fallback for browsers without `overlay` / discrete `display` transitions.
+- **Top-Layer Notifications (`components/ToastPopover.tsx`)**: Use `<ToastPopover>` (`popover="manual"`, `role="region" aria-label="Notifications"`, `popoverTargetAction="hide"`) for transient status/undo toasts.
+- **Account / Action Popovers (`components/ClientRootLayout.tsx`)**: `.me-menu` uses `popover="auto"` with `@supports (position-area: block-end)` CSS Anchor Positioning and `:popover-open` display scoping.
+- **Contrast & Design Tokens (`app/globals.css`)**:
+  - Use `--pink-text` (`#C70050`) for pink text on light surfaces (`#FFFFFF`, `--pearl`, `--ground`) to maintain WCAG AA `>= 4.5:1` contrast; reserve `--pink` (`#FF0066`) for borders, fills, and accents.
+  - All form inputs/selects must have explicit `<label htmlFor>` + `id` or `aria-label`; icon-only buttons (`✕`, `◀`, `▶`) must have `aria-label`; headings must follow sequential order (`h1` → `h2` → `h3`).
+- **Performance & Caching**:
+  - `GET /api/cloudinary/images` sets `Cache-Control: private, max-age=30, stale-while-revalidate=60` (bypassed with `cache: 'no-store'` when `force = true` on manual refresh).
+  - Sidebar/footer UI logos use `public/5dvr-logo-sm.png` (`88×88`, ~2.4 KB); `public/5dvr-logo.png` (`255×256`) is reserved for app icons/metadata.
+  - Project detail loading state (`app/projects/[id]/page.tsx`) uses `minHeight: '105vh'` so the footer stays below the fold during load (`CLS` protection).
+- **Verified Lighthouse Baseline (2026-11-15)**: `/` (`100 / 100 / 100 / 100`), `/projects` (`99 / 100 / 100 / 100`), `/projects/[id]` (`96 / 100 / 100 / 100` before `105vh` & `5dvr-logo-sm.png` polish).

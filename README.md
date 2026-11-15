@@ -65,7 +65,9 @@ Enterprise Photobooth Management, Monitoring, and Asset Distribution Dashboard. 
 │   └── page.tsx                      # Main overview analytics dashboard
 ├── components/
 │   ├── AuthContext.tsx               # Supabase session & user profile provider
-│   └── ClientRootLayout.tsx          # Navigation sidebar & permission guards
+│   ├── ClientRootLayout.tsx          # Navigation sidebar, popover account menu & guards
+│   ├── ModalDialog.tsx               # Reusable native <dialog> top-layer modal/drawer/lightbox
+│   └── ToastPopover.tsx              # Reusable popover="manual" top-layer toast notification
 ├── scripts/
 │   └── verify-supabase.js            # Automated verification test script for Supabase DB
 ├── supabase/
