@@ -57,68 +57,101 @@ export default function DashboardPage() {
     const fetchDashboardData = async () => {
         setIsLoading(true);
         try {
-            let projectsQuery = supabase.from('projects').select('*');
+            const PROJECT_SUMMARY_COLS =
+                'id, name, description, max_usage, total_usage, is_active, total_printed_copies, created_at, created_by';
 
-            if (user?.role !== UserRole.ADMIN) {
+            if (user?.role === UserRole.ADMIN) {
+                const [
+                    { data: projectsData },
+                    { data: profilesData },
+                    { data: allowedData },
+                    { data: logsData },
+                ] = await Promise.all([
+                    supabase
+                        .from('projects')
+                        .select(PROJECT_SUMMARY_COLS)
+                        .order('total_usage', { ascending: false }),
+                    supabase.from('profiles').select('id, email, role'),
+                    supabase.from('allowed_users').select('email, role'),
+                    supabase
+                        .from('usage_logs')
+                        .select('id, project_id, timestamp, amount')
+                        .order('timestamp', { ascending: true }),
+                ]);
+
+                const mappedProjects: Project[] = (projectsData || []).map(p => ({
+                    id: p.id,
+                    name: p.name,
+                    description: p.description || '',
+                    dailyLimit: p.max_usage || 1000,
+                    currentGenerations: p.total_usage || 0,
+                    is_active: p.is_active !== false,
+                    status: p.is_active === false ? 'paused' : 'active',
+                    totalPrintedCopies: p.total_printed_copies || 0,
+                    createdAt: p.created_at || '',
+                    ownerId: p.created_by || '',
+                }));
+
+                setAllProjects(mappedProjects);
+                setProfilesList(profilesData || []);
+                setWhitelistList(allowedData || []);
+                setUsageLogs(
+                    (logsData || []).map(l => ({
+                        id: l.id,
+                        projectId: l.project_id,
+                        timestamp: l.timestamp,
+                        amount: l.amount || 1,
+                    }))
+                );
+            } else {
                 const { data: memberProjects } = await supabase
                     .from('project_members')
                     .select('project_id')
                     .eq('user_id', user?.id);
 
                 const memberIds = (memberProjects || []).map(m => m.project_id);
-                projectsQuery = projectsQuery.or(
-                    `created_by.eq.${user?.id},id.in.(${memberIds.length ? memberIds.join(',') : '00000000-0000-0000-0000-000000000000'})`
-                );
-            }
+                const { data: projectsData } = await supabase
+                    .from('projects')
+                    .select(PROJECT_SUMMARY_COLS)
+                    .or(
+                        `created_by.eq.${user?.id},id.in.(${memberIds.length ? memberIds.join(',') : '00000000-0000-0000-0000-000000000000'})`
+                    )
+                    .order('total_usage', { ascending: false });
 
-            const { data: projectsData } = await projectsQuery.order('total_usage', { ascending: false });
+                const mappedProjects: Project[] = (projectsData || []).map(p => ({
+                    id: p.id,
+                    name: p.name,
+                    description: p.description || '',
+                    dailyLimit: p.max_usage || 1000,
+                    currentGenerations: p.total_usage || 0,
+                    is_active: p.is_active !== false,
+                    status: p.is_active === false ? 'paused' : 'active',
+                    totalPrintedCopies: p.total_printed_copies || 0,
+                    createdAt: p.created_at || '',
+                    ownerId: p.created_by || '',
+                }));
+                setAllProjects(mappedProjects);
 
-            const mappedProjects: Project[] = (projectsData || []).map(p => ({
-                id: p.id,
-                name: p.name,
-                description: p.description || '',
-                dailyLimit: p.max_usage || 1000,
-                currentGenerations: p.total_usage || 0,
-                is_active: p.is_active !== false,
-                status: p.is_active === false ? 'paused' : 'active',
-                totalPrintedCopies: p.total_printed_copies || 0,
-                createdAt: p.created_at || '',
-                ownerId: p.created_by || '',
-            }));
-            setAllProjects(mappedProjects);
-
-            if (user?.role === UserRole.ADMIN) {
-                const [{ data: profilesData }, { data: allowedData }] = await Promise.all([
-                    supabase.from('profiles').select('id, email, role'),
-                    supabase.from('allowed_users').select('email, role'),
-                ]);
-                setProfilesList(profilesData || []);
-                setWhitelistList(allowedData || []);
-            }
-
-            let logsQuery = supabase
-                .from('usage_logs')
-                .select('*')
-                .order('timestamp', { ascending: true });
-
-            if (user?.role !== UserRole.ADMIN) {
                 const projectIds = mappedProjects.map(p => p.id);
                 if (projectIds.length > 0) {
-                    logsQuery = logsQuery.in('project_id', projectIds);
+                    const { data: logsData } = await supabase
+                        .from('usage_logs')
+                        .select('id, project_id, timestamp, amount')
+                        .in('project_id', projectIds)
+                        .order('timestamp', { ascending: true });
+
+                    setUsageLogs(
+                        (logsData || []).map(l => ({
+                            id: l.id,
+                            projectId: l.project_id,
+                            timestamp: l.timestamp,
+                            amount: l.amount || 1,
+                        }))
+                    );
                 } else {
-                    logsQuery = logsQuery.eq('project_id', '00000000-0000-0000-0000-000000000000');
+                    setUsageLogs([]);
                 }
             }
-
-            const { data: logsData } = await logsQuery;
-            setUsageLogs(
-                (logsData || []).map(l => ({
-                    id: l.id,
-                    projectId: l.project_id,
-                    timestamp: l.timestamp,
-                    amount: l.amount || 1,
-                }))
-            );
         } catch (err) {
             console.error('Error fetching dashboard data:', err);
         } finally {

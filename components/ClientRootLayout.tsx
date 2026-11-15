@@ -132,15 +132,19 @@ function LayoutContent({ children }: { children: React.ReactNode }) {
     }, [loading, isAuthenticated, pathname, router]);
 
     const handleMouseMove = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
-        const rect = e.currentTarget.getBoundingClientRect();
-        const x = Math.round(e.clientX - rect.left);
-        const y = Math.round(e.clientY - rect.top);
         const now = Date.now();
+        if (rafRef.current !== null || now - lastTimeRef.current < 60) {
+            return;
+        }
         if (
-            rafRef.current !== null ||
-            now - lastTimeRef.current < 60 ||
-            Math.abs(x - lastPosRef.current.x) + Math.abs(y - lastPosRef.current.y) < 24
+            typeof window !== 'undefined' &&
+            window.matchMedia('(prefers-reduced-motion: reduce)').matches
         ) {
+            return;
+        }
+        const x = Math.round(e.pageX);
+        const y = Math.round(e.pageY);
+        if (Math.abs(x - lastPosRef.current.x) + Math.abs(y - lastPosRef.current.y) < 24) {
             return;
         }
         lastTimeRef.current = now;
@@ -593,6 +597,8 @@ function LayoutContent({ children }: { children: React.ReactNode }) {
                             alt="5dVR"
                             width={32}
                             height={32}
+                            loading="lazy"
+                            decoding="async"
                             style={{ width: 32, height: 32, display: 'block' }}
                         />
                         <svg

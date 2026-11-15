@@ -107,46 +107,65 @@ function ProjectsContent() {
     const fetchData = async () => {
         setIsLoading(true);
         try {
-            let projectsQuery = supabase.from('projects').select('*');
+            const PROJECT_LIST_COLS =
+                'id, name, description, max_usage, total_usage, created_at, created_by, is_active, project_type, total_printed_copies, ai_model_id, reference_images_count, cloudinary_account_id, cloudinary_folder, cloudinary_tag';
 
+            let memberIds: string[] = [];
             if (user?.role !== UserRole.ADMIN) {
                 const { data: memberProjects } = await supabase
                     .from('project_members')
                     .select('project_id')
                     .eq('user_id', user?.id);
+                memberIds = (memberProjects || []).map(m => m.project_id);
+            }
 
-                const memberIds = (memberProjects || []).map(m => m.project_id);
+            let projectsQuery = supabase.from('projects').select(PROJECT_LIST_COLS);
+            if (user?.role !== UserRole.ADMIN) {
                 projectsQuery = projectsQuery.or(
                     `created_by.eq.${user?.id},id.in.(${memberIds.length ? memberIds.join(',') : '00000000-0000-0000-0000-000000000000'})`
                 );
             }
 
-            const { data: projectsData, error: pError } = await projectsQuery.order('created_at', {
-                ascending: false,
-            });
-
-            if (pError) throw pError;
-
-            // Fetch Cloudinary Accounts & AI Models Catalog in parallel
-            const [{ data: accData }, { data: modelRows, error: modelErr }] = await Promise.all([
+            const [
+                { data: projectsData, error: pError },
+                { data: accData },
+                { data: modelRows, error: modelErr },
+                logsRes,
+                usersRes,
+            ] = await Promise.all([
+                projectsQuery.order('created_at', { ascending: false }),
                 supabase
                     .from('cloudinary_accounts')
-                    .select('*')
+                    .select('id, label, cloud_name, is_default')
                     .order('is_default', { ascending: false })
                     .order('created_at', { ascending: true }),
                 supabase
                     .from('ai_models')
-                    .select('*')
+                    .select('id, name, provider, cost_1_ref, cost_2_refs, cost_3_plus_refs, is_default')
                     .order('is_default', { ascending: false })
                     .order('created_at', { ascending: true }),
+                user?.role === UserRole.ADMIN
+                    ? supabase
+                          .from('usage_logs')
+                          .select('project_id, timestamp')
+                          .order('timestamp', { ascending: false })
+                    : Promise.resolve({ data: null as { project_id: string; timestamp: string }[] | null }),
+                user?.role === UserRole.ADMIN
+                    ? supabase
+                          .from('profiles')
+                          .select('id, full_name, email, role')
+                          .order('full_name', { ascending: true })
+                    : Promise.resolve({ data: null }),
             ]);
+
+            if (pError) throw pError;
 
             const mappedAccs: CloudinaryAccount[] = (accData || []).map(a => ({
                 id: a.id,
                 label: a.label,
                 cloudName: a.cloud_name,
-                apiKey: a.api_key,
-                apiSecret: a.api_secret,
+                apiKey: '',
+                apiSecret: '',
                 isDefault: Boolean(a.is_default),
             }));
             setCloudinaryAccounts(mappedAccs);
@@ -208,7 +227,7 @@ function ProjectsContent() {
                     totalPrintedCopies: p.total_printed_copies || 0,
                     aiModelId: p.ai_model_id || linkedModel?.id || null,
                     aiModelProvider: linkedModel?.provider || 'openai',
-                    aiApiKey: typeof p.ai_api_key === 'string' ? p.ai_api_key : '',
+                    aiApiKey: '',
                     selectedAiModel: resolvedModelName,
                     referenceImagesCount: Math.max(
                         1,
@@ -224,14 +243,18 @@ function ProjectsContent() {
 
             setProjects(mappedProjects);
 
-            // Fetch latest usage log per project for "Last portrait"
+            // Resolve latest usage log per project for "Last portrait"
             const projectIds = mappedProjects.map(p => p.id);
             if (projectIds.length > 0) {
-                const { data: logsData } = await supabase
-                    .from('usage_logs')
-                    .select('project_id, timestamp')
-                    .in('project_id', projectIds)
-                    .order('timestamp', { ascending: false });
+                let logsData = logsRes.data;
+                if (user?.role !== UserRole.ADMIN) {
+                    const { data } = await supabase
+                        .from('usage_logs')
+                        .select('project_id, timestamp')
+                        .in('project_id', projectIds)
+                        .order('timestamp', { ascending: false });
+                    logsData = data;
+                }
 
                 const lastMap: Record<string, string> = {};
                 for (const l of logsData || []) {
@@ -242,15 +265,9 @@ function ProjectsContent() {
                 setLastPortraitByProject(lastMap);
             }
 
-            // Fetch Users (for assignment)
-            if (user?.role === UserRole.ADMIN) {
-                const { data: userData } = await supabase
-                    .from('profiles')
-                    .select('*')
-                    .order('full_name', { ascending: true });
-
+            if (user?.role === UserRole.ADMIN && usersRes.data) {
                 setUsers(
-                    (userData || []).map(u => ({
+                    usersRes.data.map(u => ({
                         id: u.id,
                         name: u.full_name || u.email,
                         email: u.email,
@@ -563,7 +580,7 @@ function ProjectsContent() {
                                 type="button"
                                 className="chip"
                                 aria-pressed={isOn}
-                                onClick={() => setFilter(c.id)}
+                                onClick={() => React.startTransition(() => setFilter(c.id))}
                                 style={
                                     isOn
                                         ? {
@@ -614,7 +631,10 @@ function ProjectsContent() {
                             className="field"
                             style={{ width: 200 }}
                             value={sortBy}
-                            onChange={e => setSortBy(e.target.value as SortMode)}
+                            onChange={e => {
+                                const nextSort = e.target.value as SortMode;
+                                React.startTransition(() => setSortBy(nextSort));
+                            }}
                         >
                             <option value="active">In use first</option>
                             <option value="newest">Newest first</option>
@@ -644,7 +664,7 @@ function ProjectsContent() {
                                 type="button"
                                 className={`vbtn${viewMode === 'cards' ? ' on' : ''}`}
                                 aria-pressed={viewMode === 'cards'}
-                                onClick={() => setViewMode('cards')}
+                                onClick={() => React.startTransition(() => setViewMode('cards'))}
                             >
                                 <svg
                                     aria-hidden="true"
@@ -667,7 +687,7 @@ function ProjectsContent() {
                                 type="button"
                                 className={`vbtn${viewMode === 'table' ? ' on' : ''}`}
                                 aria-pressed={viewMode === 'table'}
-                                onClick={() => setViewMode('table')}
+                                onClick={() => React.startTransition(() => setViewMode('table'))}
                             >
                                 <svg
                                     aria-hidden="true"
@@ -693,6 +713,8 @@ function ProjectsContent() {
                 <div
                     className="card emerge"
                     style={{
+                        minHeight: '65vh',
+                        justifyContent: 'center',
                         padding: '48px 24px',
                         alignItems: 'center',
                         textAlign: 'center',
@@ -730,7 +752,9 @@ function ProjectsContent() {
                                         key={p.id}
                                         className="pcard lift"
                                         href={`/projects/${p.id}`}
-                                        aria-label={`Open ${p.name}`}
+                                        prefetch={false}
+                                        onMouseEnter={() => router.prefetch(`/projects/${p.id}`)}
+                                        onFocus={() => router.prefetch(`/projects/${p.id}`)}
                                     >
                                         <div
                                             aria-hidden="true"
@@ -993,6 +1017,9 @@ function ProjectsContent() {
                                                 <Link
                                                     className="row-link"
                                                     href={`/projects/${p.id}`}
+                                                    prefetch={false}
+                                                    onMouseEnter={() => router.prefetch(`/projects/${p.id}`)}
+                                                    onFocus={() => router.prefetch(`/projects/${p.id}`)}
                                                     title={p.name}
                                                     style={{
                                                         display: 'block',
@@ -1095,6 +1122,9 @@ function ProjectsContent() {
                                             <Link
                                                 className="icon-btn"
                                                 href={`/projects/${p.id}`}
+                                                prefetch={false}
+                                                onMouseEnter={() => router.prefetch(`/projects/${p.id}`)}
+                                                onFocus={() => router.prefetch(`/projects/${p.id}`)}
                                                 aria-label={`Open ${p.name}`}
                                             >
                                                 <svg

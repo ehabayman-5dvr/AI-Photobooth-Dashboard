@@ -75,3 +75,17 @@ This file defines the architecture, conventions, and rules for agents and develo
 2. **Next.js App Router**: Client components must declare `'use client'` at the very top.
 3. **Build Validation**: Always verify `npm run build` passes before submitting pull requests or concluding complex tasks.
 4. **Environment Variables**: Never hardcode credentials. Reference `.env.local` variables.
+
+---
+
+## 6. Browser Support Policy & Modern Web Guidance Standards
+
+- **Browser Support Target**: **Baseline Widely Available**.
+  - Treat all **Baseline Widely Available** HTML, CSS, and Web APIs (`<dialog>`, `Popover` API, `@container` queries, `:has()`, `:user-invalid`, `text-wrap: balance`, `content-visibility: auto`, `fetchpriority`, `scrollbar-color`) as safe to use directly without polyfills or JS workarounds.
+  - **Newly Available / Progressive Enhancement Policy**: Allow **Baseline Newly Available** and modern Chromium capabilities (`CSS Anchor Positioning`, `@starting-style` + `transition-behavior: allow-discrete`, `interpolate-size: allow-keywords`, `<dialog closedby="any">`, `field-sizing: content`, Same-Document `View Transitions`) when guarded with `@supports` or runtime feature detection (`if ('startViewTransition' in document)`) and paired with graceful degradation or a lightweight zero-dependency fallback (`<= 20` lines, no external polyfill packages).
+- **Mandatory `modern-web-guidance` Workflow**:
+  - Before writing or refactoring any HTML structure, CSS layout/animation, overlay/modal/popover/dropdown, form control, accessibility pattern, or client-side performance optimization, query `modern-web-guidance` (`npx.cmd --offline modern-web-guidance@latest search "<2-5 word capability>"` → `retrieve "<id>"`) and follow its guidance and fallback rules.
+- **UI & Performance Priorities**:
+  1. **Performance & Core Web Vitals (`LCP`, `INP`, `CLS`)**: Serve Cloudinary thumbnails with `f_auto,q_auto` and responsive widths; prioritize above-the-fold hero/first-row images (`fetchPriority="high"`) while lazy-loading off-screen assets (`loading="lazy"`, `decoding="async"`, `content-visibility: auto`); parallelize independent Supabase queries (`Promise.all`) and avoid synchronous layout reads (`getBoundingClientRect()`) in pointer/scroll handlers.
+  2. **Native Top-Layer Overlays & Accessibility**: Use native `<dialog>` (`.showModal()`) for modal dialogs, drawers, and lightboxes, and native `Popover` (`popover="auto"` / `"manual"`) + CSS Anchor Positioning for menus, pickers, and toasts instead of custom `position: fixed` `<div>` portals and manual coordinate math.
+  3. **CSS-First Interactions & Motion**: Prefer CSS `@container` / `@media` queries over `window.matchMedia` React state, animate composite-friendly properties (`transform`, `opacity`), and respect `@media (prefers-reduced-motion: reduce)`.

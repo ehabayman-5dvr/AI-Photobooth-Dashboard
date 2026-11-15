@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
@@ -46,10 +46,8 @@ import {
     ExternalLink,
 } from 'lucide-react';
 import { useAuth } from '@/components/AuthContext';
-import {
-    generateIntegrationGuideMarkdown,
-    getIntegrationGuideFilename,
-} from '@/utils/generateIntegrationGuide';
+
+type IntegrationGuideModule = typeof import('@/utils/generateIntegrationGuide');
 
 type ProjectTab = 'overview' | 'gallery' | 'featured' | 'developer' | 'settings';
 type ChartRange = 'event' | '7d' | '30d' | '90d' | 'all' | 'custom';
@@ -197,6 +195,20 @@ export default function ProjectDetailPage() {
         start: new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
         end: new Date().toISOString().split('T')[0],
     });
+    const [integrationModule, setIntegrationModule] = useState<IntegrationGuideModule | null>(null);
+
+    // Deduplication & hover-prefetch tracking for Cloudinary endpoints
+    const galleryLoadedKeyRef = useRef<string | null>(null);
+    const galleryInFlightKeyRef = useRef<string | null>(null);
+    const featuredLoadedKeyRef = useRef<string | null>(null);
+    const featuredInFlightKeyRef = useRef<string | null>(null);
+
+    const preloadIntegrationGuide = useCallback(() => {
+        if (integrationModule) return;
+        void import('@/utils/generateIntegrationGuide').then(mod => {
+            setIntegrationModule(() => mod);
+        });
+    }, [integrationModule]);
 
     useEffect(() => {
         setMounted(true);
@@ -213,43 +225,67 @@ export default function ProjectDetailPage() {
     }, [searchParams]);
 
     useEffect(() => {
+        if (activeTab === 'developer') {
+            preloadIntegrationGuide();
+        }
+    }, [activeTab, preloadIntegrationGuide]);
+
+    useEffect(() => {
         if (!user || !id) return;
+        galleryLoadedKeyRef.current = null;
+        galleryInFlightKeyRef.current = null;
+        featuredLoadedKeyRef.current = null;
+        featuredInFlightKeyRef.current = null;
         fetchProjectData();
-    }, [id, user, sortOrder]);
+    }, [id, user]);
 
     const switchTab = (tab: ProjectTab) => {
-        setActiveTab(tab);
-        setSelectedIds([]);
-        setIsSelectionMode(false);
+        React.startTransition(() => {
+            setActiveTab(tab);
+            setSelectedIds([]);
+            setIsSelectionMode(false);
+        });
     };
 
     const fetchProjectData = async () => {
         setIsLoading(true);
         try {
-            const { data: p, error } = await supabase
-                .from('projects')
-                .select('*')
-                .eq('id', id)
-                .single();
+            const isAdminUser = user?.role === UserRole.ADMIN;
+            const [projectRes, modelsRes, accRes, logsRes, memberRes, profileRes] =
+                await Promise.all([
+                    supabase.from('projects').select('*').eq('id', id).single(),
+                    supabase
+                        .from('ai_models')
+                        .select('*')
+                        .order('is_default', { ascending: false })
+                        .order('created_at', { ascending: true }),
+                    supabase
+                        .from('cloudinary_accounts')
+                        .select('id, label, cloud_name, is_default')
+                        .order('is_default', { ascending: false })
+                        .order('created_at', { ascending: true }),
+                    supabase
+                        .from('usage_logs')
+                        .select('id, project_id, timestamp, amount')
+                        .eq('project_id', id)
+                        .order('timestamp', { ascending: false }),
+                    supabase
+                        .from('project_members')
+                        .select('id, profiles(id, full_name, email, avatar_url, role)')
+                        .eq('project_id', id),
+                    isAdminUser
+                        ? supabase
+                              .from('profiles')
+                              .select('id, full_name, email, avatar_url, role')
+                        : Promise.resolve({ data: [], error: null }),
+                ]);
 
+            const { data: p, error } = projectRes;
             if (error) throw error;
             if (!p) {
                 router.push('/projects');
                 return;
             }
-
-            const [modelsRes, accRes] = await Promise.all([
-                supabase
-                    .from('ai_models')
-                    .select('*')
-                    .order('is_default', { ascending: false })
-                    .order('created_at', { ascending: true }),
-                supabase
-                    .from('cloudinary_accounts')
-                    .select('*')
-                    .order('is_default', { ascending: false })
-                    .order('created_at', { ascending: true }),
-            ]);
 
             let mappedModels: AiModel[] = DEFAULT_AI_MODEL_CATALOG;
             if (!modelsRes.error && Array.isArray(modelsRes.data) && modelsRes.data.length > 0) {
@@ -271,8 +307,8 @@ export default function ProjectDetailPage() {
                     id: a.id,
                     label: a.label,
                     cloudName: a.cloud_name,
-                    apiKey: a.api_key,
-                    apiSecret: a.api_secret,
+                    apiKey: '',
+                    apiSecret: '',
                     isDefault: Boolean(a.is_default),
                 }));
                 setCloudinaryAccounts(mappedAccounts);
@@ -288,8 +324,8 @@ export default function ProjectDetailPage() {
 
             const resolvedAccountId = matchedAccount?.id || p.cloudinary_account_id || '';
             const finalCloudName = matchedAccount?.cloudName || '';
-            const finalApiKey = matchedAccount?.apiKey || '';
-            const finalApiSecret = matchedAccount?.apiSecret || '';
+            const finalApiKey = '';
+            const finalApiSecret = '';
             const finalFolder = p.cloudinary_folder || p.cloudinary_tag || '';
 
             const matchedModel =
@@ -363,15 +399,9 @@ export default function ProjectDetailPage() {
                 totalPrintedCopies: resolvedTotalPrintedCopies,
             });
 
-            // Fetch all usage logs for this project
-            const { data: logsData } = await supabase
-                .from('usage_logs')
-                .select('*')
-                .eq('project_id', id)
-                .order('timestamp', { ascending: false });
-
+            const logsData = logsRes.data || [];
             setLogs(
-                (logsData || []).map((l: any) => ({
+                logsData.map((l: any) => ({
                     id: l.id,
                     projectId: l.project_id,
                     timestamp: l.timestamp,
@@ -379,29 +409,37 @@ export default function ProjectDetailPage() {
                 }))
             );
 
-            if (mapped.cloudinaryTag) {
-                fetchImages(mapped.cloudinaryTag, mapped, false);
-                fetchFeaturedImages(mapped, false);
-            }
-
-            // Fetch Members
-            const { data: memberData } = await supabase
-                .from('project_members')
-                .select('id, profiles(id, full_name, email, avatar_url, role)')
-                .eq('project_id', id);
-
             setMembers(
-                (memberData || []).map((m: any) => ({
+                (memberRes.data || []).map((m: any) => ({
                     memberId: m.id,
                     ...(Array.isArray(m.profiles) ? m.profiles[0] : m.profiles || {}),
                 }))
             );
 
-            if (user?.role === UserRole.ADMIN) {
-                const { data: profileData } = await supabase
-                    .from('profiles')
-                    .select('id, full_name, email, avatar_url, role');
-                setAllProfiles(profileData || []);
+            if (isAdminUser) {
+                setAllProfiles(profileRes.data || []);
+            }
+
+            if (mapped.cloudinaryTag) {
+                const tabParam = searchParams?.get('tab');
+                const isInitialGallery =
+                    activeTab === 'gallery' || tabParam === 'gallery' || tabParam === 'images';
+                const isInitialFeatured = activeTab === 'featured' || tabParam === 'featured';
+
+                // Featured count is displayed on Overview KPI card -> deprioritize when not on Featured tab
+                void fetchFeaturedImages(
+                    mapped,
+                    false,
+                    isInitialFeatured ? 'auto' : 'low'
+                );
+
+                // Defer full Gallery load until hover/focus or tab click unless directly visiting Gallery
+                // (or legacy project with generations but zero usage_logs rows)
+                if (isInitialGallery) {
+                    void fetchImages(mapped.cloudinaryTag, mapped, false, 'auto');
+                } else if (logsData.length === 0 && (p.total_usage || 0) > 0) {
+                    void fetchImages(mapped.cloudinaryTag, mapped, false, 'low');
+                }
             }
         } catch (err) {
             console.error('Error fetching project:', err);
@@ -580,15 +618,35 @@ export default function ProjectDetailPage() {
         }
     };
 
-    const fetchImages = async (tag?: string, currentProject?: Project, append = false) => {
+    const fetchImages = async (
+        tag?: string,
+        currentProject?: Project,
+        append = false,
+        priority: 'auto' | 'low' = 'auto',
+        force = false
+    ) => {
         const p = currentProject || project;
         if (!p) return;
 
         const activeTag = tag || p.cloudinaryTag || '';
         if (!activeTag) return;
 
-        if (append) setLoadingMore(true);
-        else setLoadingImages(true);
+        const fetchKey = `${p.id}:${activeTag}:${sortOrder}`;
+        if (!append && !force) {
+            if (
+                galleryLoadedKeyRef.current === fetchKey ||
+                galleryInFlightKeyRef.current === fetchKey
+            ) {
+                return;
+            }
+        }
+
+        if (append) {
+            setLoadingMore(true);
+        } else {
+            galleryInFlightKeyRef.current = fetchKey;
+            setLoadingImages(true);
+        }
 
         try {
             let url = `/api/cloudinary/images?projectId=${encodeURIComponent(p.id)}&tag=${encodeURIComponent(activeTag)}&sort=${sortOrder}`;
@@ -599,16 +657,21 @@ export default function ProjectDetailPage() {
                 url += `&next_cursor=${nextCursor}`;
             }
 
-            const response = await fetch(url);
+            const init: RequestInit | undefined =
+                priority === 'low' ? ({ priority: 'low' } as RequestInit) : undefined;
+            const response = await fetch(url, init);
             if (response.ok) {
                 const data = await response.json();
                 if (append) {
                     setImages(prev => {
                         const existingIds = new Set(prev.map(i => i.public_id));
-                        const newResources = (data.resources || []).filter((r: any) => !existingIds.has(r.public_id));
+                        const newResources = (data.resources || []).filter(
+                            (r: any) => !existingIds.has(r.public_id)
+                        );
                         return [...prev, ...newResources];
                     });
                 } else {
+                    galleryLoadedKeyRef.current = fetchKey;
                     setImages(data.resources || []);
                 }
                 setNextCursor(data.next_cursor || null);
@@ -618,20 +681,42 @@ export default function ProjectDetailPage() {
         } catch (err) {
             console.error('Error fetching Cloudinary images:', err);
         } finally {
+            if (!append && galleryInFlightKeyRef.current === fetchKey) {
+                galleryInFlightKeyRef.current = null;
+            }
             setLoadingImages(false);
             setLoadingMore(false);
         }
     };
 
-    const fetchFeaturedImages = async (currentProject?: Project, append = false) => {
+    const fetchFeaturedImages = async (
+        currentProject?: Project,
+        append = false,
+        priority: 'auto' | 'low' = 'auto',
+        force = false
+    ) => {
         const p = currentProject || project;
         if (!p) return;
 
         const projectTag = p.cloudinaryTag || '';
         if (!projectTag) return;
 
-        if (append) setLoadingMoreFeatured(true);
-        else setLoadingFeatured(true);
+        const fetchKey = `${p.id}:${projectTag}:${sortOrder}`;
+        if (!append && !force) {
+            if (
+                featuredLoadedKeyRef.current === fetchKey ||
+                featuredInFlightKeyRef.current === fetchKey
+            ) {
+                return;
+            }
+        }
+
+        if (append) {
+            setLoadingMoreFeatured(true);
+        } else {
+            featuredInFlightKeyRef.current = fetchKey;
+            setLoadingFeatured(true);
+        }
 
         try {
             let url = `/api/cloudinary/images?projectId=${encodeURIComponent(p.id)}&tag=${encodeURIComponent(projectTag)}&subtag=Featured&sort=${sortOrder}`;
@@ -642,16 +727,21 @@ export default function ProjectDetailPage() {
                 url += `&next_cursor=${featuredCursor}`;
             }
 
-            const response = await fetch(url);
+            const init: RequestInit | undefined =
+                priority === 'low' ? ({ priority: 'low' } as RequestInit) : undefined;
+            const response = await fetch(url, init);
             if (response.ok) {
                 const data = await response.json();
                 if (append) {
                     setFeaturedImages(prev => {
                         const existingIds = new Set(prev.map(i => i.public_id));
-                        const newResources = (data.resources || []).filter((r: any) => !existingIds.has(r.public_id));
+                        const newResources = (data.resources || []).filter(
+                            (r: any) => !existingIds.has(r.public_id)
+                        );
                         return [...prev, ...newResources];
                     });
                 } else {
+                    featuredLoadedKeyRef.current = fetchKey;
                     setFeaturedImages(data.resources || []);
                 }
                 setFeaturedCursor(data.next_cursor || null);
@@ -661,10 +751,28 @@ export default function ProjectDetailPage() {
         } catch (err) {
             console.error('Error fetching Featured images:', err);
         } finally {
+            if (!append && featuredInFlightKeyRef.current === fetchKey) {
+                featuredInFlightKeyRef.current = null;
+            }
             setLoadingFeatured(false);
             setLoadingMoreFeatured(false);
         }
     };
+
+    const prefetchGalleryImages = () => {
+        if (project?.cloudinaryTag) {
+            void fetchImages(project.cloudinaryTag, project, false, 'low');
+        }
+    };
+
+    useEffect(() => {
+        if (!project?.cloudinaryTag) return;
+        if (activeTab === 'gallery') {
+            void fetchImages(project.cloudinaryTag, project, false, 'auto');
+        } else if (activeTab === 'featured') {
+            void fetchFeaturedImages(project, false, 'auto');
+        }
+    }, [activeTab, project?.id, project?.cloudinaryTag, sortOrder]);
 
     const handleSimulateApiCall = async () => {
         if (!project || isSimulating) return;
@@ -709,8 +817,16 @@ export default function ProjectDetailPage() {
     const getFullImageUrl = (img: CloudinaryImage) =>
         `https://res.cloudinary.com/${project?.cloudinaryCloudName || 'placeholder'}/image/upload/v${img.version}/${img.public_id}.${img.format}`;
 
-    const getThumbImageUrl = (img: CloudinaryImage) =>
-        `https://res.cloudinary.com/${project?.cloudinaryCloudName || 'placeholder'}/image/upload/w_500,c_fill,g_auto/v${img.version}/${img.public_id}.${img.format}`;
+    const getThumbImageUrl = (img: CloudinaryImage, width = 500) =>
+        `https://res.cloudinary.com/${project?.cloudinaryCloudName || 'placeholder'}/image/upload/f_auto,q_auto,w_${width},c_fill,g_auto/v${img.version}/${img.public_id}.${img.format}`;
+
+    const getThumbSrcSet = (img: CloudinaryImage) =>
+        `${getThumbImageUrl(img, 320)} 320w, ${getThumbImageUrl(img, 500)} 500w, ${getThumbImageUrl(img, 760)} 760w`;
+
+    const THUMB_SIZES = '(max-width: 640px) 46vw, (max-width: 1100px) 30vw, 240px';
+
+    const getPreviewImageUrl = (img: CloudinaryImage, maxWidth = 1400) =>
+        `https://res.cloudinary.com/${project?.cloudinaryCloudName || 'placeholder'}/image/upload/f_auto,q_auto,w_${maxWidth},c_limit/v${img.version}/${img.public_id}.${img.format}`;
 
     const handleDownloadSingleImage = (img: CloudinaryImage) => {
         const dateStr = new Date(img.created_at)
@@ -797,17 +913,23 @@ export default function ProjectDetailPage() {
 
     const toggleSelectAll = () => {
         const currentImages = activeTab === 'featured' ? featuredImages : filteredGalleryImages;
-        if (selectedIds.length === currentImages.length) {
-            setSelectedIds([]);
-        } else {
-            setSelectedIds(currentImages.map(img => img.public_id));
-        }
+        React.startTransition(() => {
+            if (selectedIds.length === currentImages.length) {
+                setSelectedIds([]);
+            } else {
+                setSelectedIds(currentImages.map(img => img.public_id));
+            }
+        });
     };
 
     const toggleImageSelection = (publicId: string) => {
-        setSelectedIds(prev =>
-            prev.includes(publicId) ? prev.filter(item => item !== publicId) : [...prev, publicId]
-        );
+        React.startTransition(() => {
+            setSelectedIds(prev =>
+                prev.includes(publicId)
+                    ? prev.filter(item => item !== publicId)
+                    : [...prev, publicId]
+            );
+        });
     };
 
     const copyToClipboard = (text: string) => {
@@ -834,28 +956,45 @@ export default function ProjectDetailPage() {
         setTimeout(() => setCopiedPrintUrl(false), 2000);
     };
 
-    const integrationMarkdown = useMemo(() => {
-        if (!project) return '';
-        return generateIntegrationGuideMarkdown({
+    const buildGuideParams = useCallback(() => {
+        if (!project) return null;
+        return {
             projectId: project.id,
             projectName: project.name,
-            projectType: project.projectType === 'web' ? 'web' : 'desktop',
+            projectType: (project.projectType === 'web' ? 'web' : 'desktop') as 'web' | 'desktop',
             baseUrl: origin || 'https://ai-photobooth-dashboard.vercel.app',
             cloudinaryFolder:
                 project.cloudinaryFolder ||
                 project.cloudinaryTag ||
                 project.name.trim().replace(/\s+/g, '-'),
             selectedAiModel: project.selectedAiModel || DEFAULT_AI_MODEL_CATALOG[0].name,
-            aiModelProvider: project.aiModelProvider === 'gemini' ? 'gemini' : 'openai',
+            aiModelProvider: (project.aiModelProvider === 'gemini' ? 'gemini' : 'openai') as
+                | 'gemini'
+                | 'openai',
             dailyLimit: project.dailyLimit || 1000,
             referenceImagesCount: project.referenceImagesCount || 1,
-        });
+        };
     }, [project, origin]);
 
-    const integrationFilename = useMemo(
-        () => getIntegrationGuideFilename(project?.name || 'photobooth-project'),
-        [project?.name]
-    );
+    const integrationMarkdown = useMemo(() => {
+        const paramsObj = buildGuideParams();
+        if (!paramsObj || !integrationModule) return '';
+        return integrationModule.generateIntegrationGuideMarkdown(paramsObj);
+    }, [buildGuideParams, integrationModule]);
+
+    const integrationFilename = useMemo(() => {
+        const rawName = project?.name || 'photobooth-project';
+        if (integrationModule) {
+            return integrationModule.getIntegrationGuideFilename(rawName);
+        }
+        const slug =
+            rawName
+                .trim()
+                .toLowerCase()
+                .replace(/[^a-z0-9]+/g, '-')
+                .replace(/^-+|-+$/g, '') || 'photobooth-project';
+        return `${slug}-agent-integration-guide.md`;
+    }, [project?.name, integrationModule]);
 
     const envSnippet = useMemo(() => {
         if (!project) return '';
@@ -869,9 +1008,19 @@ export default function ProjectDetailPage() {
         return `VITE_DASHBOARD_URL=${cleanBase}\nVITE_DASHBOARD_PROJECT_ID=${project.id}`;
     }, [project, origin]);
 
-    const handleDownloadIntegrationGuide = () => {
-        if (!integrationMarkdown) return;
-        const blob = new Blob([integrationMarkdown], { type: 'text/markdown;charset=utf-8' });
+    const resolveIntegrationMarkdown = async () => {
+        if (integrationMarkdown) return integrationMarkdown;
+        const paramsObj = buildGuideParams();
+        if (!paramsObj) return '';
+        const mod = integrationModule || (await import('@/utils/generateIntegrationGuide'));
+        if (!integrationModule) setIntegrationModule(() => mod);
+        return mod.generateIntegrationGuideMarkdown(paramsObj);
+    };
+
+    const handleDownloadIntegrationGuide = async () => {
+        const md = await resolveIntegrationMarkdown();
+        if (!md) return;
+        const blob = new Blob([md], { type: 'text/markdown;charset=utf-8' });
         const url = window.URL.createObjectURL(blob);
         const link = document.createElement('a');
         link.href = url;
@@ -882,9 +1031,10 @@ export default function ProjectDetailPage() {
         window.URL.revokeObjectURL(url);
     };
 
-    const handleCopyIntegrationGuide = () => {
-        if (!integrationMarkdown) return;
-        navigator.clipboard.writeText(integrationMarkdown);
+    const handleCopyIntegrationGuide = async () => {
+        const md = await resolveIntegrationMarkdown();
+        if (!md) return;
+        navigator.clipboard.writeText(md);
         setCopiedMarkdown(true);
         setTimeout(() => setCopiedMarkdown(false), 2200);
     };
@@ -1216,7 +1366,7 @@ export default function ProjectDetailPage() {
 
     if (isLoading || !project || !user) {
         return (
-            <div style={{ minHeight: '60vh', display: 'grid', placeItems: 'center' }}>
+            <div style={{ minHeight: '78vh', display: 'grid', placeItems: 'center' }}>
                 <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12 }}>
                     <Loader2 className="animate-spin" style={{ color: 'var(--pink)' }} size={36} />
                     <span className="lbl">Loading project…</span>
@@ -1391,6 +1541,8 @@ export default function ProjectDetailPage() {
                     type="button"
                     role="tab"
                     aria-selected={activeTab === 'gallery'}
+                    onMouseEnter={prefetchGalleryImages}
+                    onFocus={prefetchGalleryImages}
                     onClick={() => switchTab('gallery')}
                     className={`tab${activeTab === 'gallery' ? ' on' : ''}`}
                 >
@@ -1400,6 +1552,16 @@ export default function ProjectDetailPage() {
                     type="button"
                     role="tab"
                     aria-selected={activeTab === 'featured'}
+                    onMouseEnter={() => {
+                        if (project?.cloudinaryTag) {
+                            void fetchFeaturedImages(project, false, 'low');
+                        }
+                    }}
+                    onFocus={() => {
+                        if (project?.cloudinaryTag) {
+                            void fetchFeaturedImages(project, false, 'low');
+                        }
+                    }}
                     onClick={() => switchTab('featured')}
                     className={`tab${activeTab === 'featured' ? ' on' : ''}`}
                 >
@@ -1411,6 +1573,8 @@ export default function ProjectDetailPage() {
                             type="button"
                             role="tab"
                             aria-selected={activeTab === 'developer'}
+                            onMouseEnter={preloadIntegrationGuide}
+                            onFocus={preloadIntegrationGuide}
                             onClick={() => switchTab('developer')}
                             className={`tab${activeTab === 'developer' ? ' on' : ''}`}
                         >
@@ -1714,7 +1878,9 @@ export default function ProjectDetailPage() {
                                                 type="button"
                                                 aria-pressed={chartRange === key}
                                                 className={`seg${chartRange === key ? ' on' : ''}`}
-                                                onClick={() => setChartRange(key)}
+                                                onClick={() =>
+                                                    React.startTransition(() => setChartRange(key))
+                                                }
                                             >
                                                 {label}
                                             </button>
@@ -2458,7 +2624,10 @@ export default function ProjectDetailPage() {
                                 className="field"
                                 style={{ width: 'auto', padding: '9px 12px', fontSize: 12 }}
                                 value={dayFilter}
-                                onChange={e => setDayFilter(e.target.value)}
+                                onChange={e => {
+                                    const nextDay = e.target.value;
+                                    React.startTransition(() => setDayFilter(nextDay));
+                                }}
                             >
                                 <option value="all">
                                     All days
@@ -2478,7 +2647,10 @@ export default function ProjectDetailPage() {
                                 className="field"
                                 style={{ width: 'auto', padding: '9px 12px', fontSize: 12 }}
                                 value={sortOrder}
-                                onChange={e => setSortOrder(e.target.value as 'desc' | 'asc')}
+                                onChange={e => {
+                                    const nextOrder = e.target.value as 'desc' | 'asc';
+                                    React.startTransition(() => setSortOrder(nextOrder));
+                                }}
                             >
                                 <option value="desc">Newest first</option>
                                 <option value="asc">Oldest first</option>
@@ -2488,7 +2660,7 @@ export default function ProjectDetailPage() {
                                 type="button"
                                 className="btn"
                                 style={{ padding: '9px 12px', fontSize: 12 }}
-                                onClick={() => fetchImages()}
+                                onClick={() => fetchImages(undefined, undefined, false, 'auto', true)}
                             >
                                 <RefreshCw
                                     size={13}
@@ -2646,7 +2818,7 @@ export default function ProjectDetailPage() {
                                     gap: 20,
                                 }}
                             >
-                                {filteredGalleryImages.map(img => {
+                                {filteredGalleryImages.map((img, idx) => {
                                     const isFeatured = Boolean(img.tags?.includes('Featured'));
                                     const isSel = selectedIds.includes(img.public_id);
                                     const timeLabel = new Date(img.created_at).toLocaleString(
@@ -2684,8 +2856,14 @@ export default function ProjectDetailPage() {
                                             >
                                                 <img
                                                     src={getThumbImageUrl(img)}
+                                                    srcSet={getThumbSrcSet(img)}
+                                                    sizes={THUMB_SIZES}
+                                                    width={500}
+                                                    height={750}
                                                     alt={img.public_id}
-                                                    loading="lazy"
+                                                    fetchPriority={idx === 0 ? 'high' : undefined}
+                                                    loading={idx < 8 ? undefined : 'lazy'}
+                                                    decoding={idx === 0 ? 'sync' : 'async'}
                                                     style={{
                                                         position: 'absolute',
                                                         inset: 0,
@@ -3007,7 +3185,7 @@ export default function ProjectDetailPage() {
                                     gap: 20,
                                 }}
                             >
-                                {featuredImages.map(img => {
+                                {featuredImages.map((img, idx) => {
                                     const timeLabel = new Date(img.created_at).toLocaleString(
                                         undefined,
                                         {
@@ -3039,8 +3217,14 @@ export default function ProjectDetailPage() {
                                             >
                                                 <img
                                                     src={getThumbImageUrl(img)}
+                                                    srcSet={getThumbSrcSet(img)}
+                                                    sizes={THUMB_SIZES}
+                                                    width={500}
+                                                    height={750}
                                                     alt={img.public_id}
-                                                    loading="lazy"
+                                                    fetchPriority={idx === 0 ? 'high' : undefined}
+                                                    loading={idx < 8 ? undefined : 'lazy'}
+                                                    decoding={idx === 0 ? 'sync' : 'async'}
                                                     style={{
                                                         position: 'absolute',
                                                         inset: 0,
@@ -4507,8 +4691,9 @@ export default function ProjectDetailPage() {
                                     }}
                                 >
                                     <img
-                                        src={getFullImageUrl(inspectImage)}
+                                        src={getPreviewImageUrl(inspectImage, 760)}
                                         alt={inspectImage.public_id}
+                                        decoding="async"
                                         style={{
                                             width: '100%',
                                             height: '100%',
@@ -4772,8 +4957,9 @@ export default function ProjectDetailPage() {
                                 }}
                             >
                                 <img
-                                    src={getFullImageUrl(lightboxImage)}
+                                    src={getPreviewImageUrl(lightboxImage, 1600)}
                                     alt={lightboxImage.public_id}
+                                    decoding="async"
                                     className="zoomin"
                                     style={{
                                         maxHeight: 'calc(100vh - 130px)',

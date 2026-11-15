@@ -23,6 +23,76 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const [loading, setLoading] = useState(true);
 
     const isResolving = React.useRef(false);
+    const loadedUserIdRef = React.useRef<string | null>(null);
+    const inFlightProfileRef = React.useRef<{ userId: string; promise: Promise<void> } | null>(null);
+
+    const fetchUserProfile = React.useCallback(async (activeSession: Session, force = false) => {
+        const userId = activeSession.user.id;
+
+        if (!force && loadedUserIdRef.current === userId) {
+            setLoading(false);
+            return;
+        }
+
+        if (inFlightProfileRef.current?.userId === userId) {
+            return inFlightProfileRef.current.promise;
+        }
+
+        const run = (async () => {
+            try {
+                const fetchPromise = supabase
+                    .from('profiles')
+                    .select('id, full_name, email, role')
+                    .eq('id', userId)
+                    .single();
+
+                const timeoutPromise = new Promise((_, reject) =>
+                    setTimeout(() => reject(new Error('Profile fetch timed out')), 4000)
+                );
+
+                const { data } = (await Promise.race([fetchPromise, timeoutPromise])) as {
+                    data?: { id: string; full_name?: string | null; email: string; role?: string | null } | null;
+                };
+
+                if (data) {
+                    const nextRole = (data.role as UserRole) || UserRole.REGULAR;
+                    const nextName = data.full_name || 'Admin User';
+                    loadedUserIdRef.current = data.id;
+                    setUser(prev => {
+                        if (
+                            prev &&
+                            prev.id === data.id &&
+                            prev.name === nextName &&
+                            prev.email === data.email &&
+                            prev.role === nextRole
+                        ) {
+                            return prev;
+                        }
+                        return {
+                            id: data.id,
+                            name: nextName,
+                            email: data.email,
+                            role: nextRole,
+                            assignedProjectIds: prev?.assignedProjectIds || [],
+                        };
+                    });
+                } else {
+                    loadedUserIdRef.current = null;
+                    setUser(null);
+                }
+            } catch (error) {
+                console.error('❌ Auth: Profile fetch failed:', error);
+            } finally {
+                if (inFlightProfileRef.current?.userId === userId) {
+                    inFlightProfileRef.current = null;
+                }
+                setLoading(false);
+            }
+        })();
+
+        inFlightProfileRef.current = { userId, promise: run };
+        return run;
+    }, []);
 
     useEffect(() => {
         let mounted = true;
@@ -32,16 +102,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             isResolving.current = true;
 
             try {
-                console.log('🔄 Auth: Initializing session...');
                 const { data: { session: currentSession }, error: sessionError } = await supabase.auth.getSession();
 
                 if (sessionError) throw sessionError;
                 if (!mounted) return;
 
-                setSession(currentSession);
+                setSession(prev => (prev?.access_token === currentSession?.access_token ? prev : currentSession));
                 if (currentSession) {
-                    await fetchUserProfile(currentSession);
+                    await fetchUserProfile(currentSession, isRetry);
                 } else {
+                    loadedUserIdRef.current = null;
+                    setUser(null);
                     setLoading(false);
                 }
             } catch (err) {
@@ -52,33 +123,34 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             }
         };
 
-        // Listen for auth changes
-        const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+        // Listen for subsequent auth changes without duplicating initial boot fetch
+        const { data: { subscription } } = supabase.auth.onAuthStateChange((event, nextSession) => {
             if (!mounted) return;
-            console.log('🔑 Auth event:', event);
+            if (event === 'INITIAL_SESSION') return;
 
-            // Only trigger a new profile fetch if the session actually changed
-            setSession(prev => {
-                if (session?.user.id !== prev?.user.id || event === 'SIGNED_IN') {
-                    if (session) fetchUserProfile(session);
-                    else {
-                        setUser(null);
-                        setLoading(false);
-                    }
-                }
-                return session;
-            });
+            setSession(prev => (prev?.access_token === nextSession?.access_token ? prev : nextSession));
+
+            if (!nextSession || event === 'SIGNED_OUT') {
+                loadedUserIdRef.current = null;
+                setUser(null);
+                setLoading(false);
+                return;
+            }
+
+            if (event === 'SIGNED_IN' || event === 'USER_UPDATED') {
+                const forceRefresh = event === 'USER_UPDATED';
+                void fetchUserProfile(nextSession, forceRefresh);
+            }
         });
 
-        // Wake up connection when tab becomes visible
+        // Refresh token quietly when tab becomes visible without recreating user state
         const handleVisibilityChange = () => {
             if (document.visibilityState === 'visible') {
-                console.log('☀️ Tab visible - verifying connection...');
-                initializeAuth();
+                void initializeAuth(false);
             }
         };
 
-        initializeAuth();
+        void initializeAuth(false);
         document.addEventListener('visibilitychange', handleVisibilityChange);
 
         return () => {
@@ -86,45 +158,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             subscription.unsubscribe();
             document.removeEventListener('visibilitychange', handleVisibilityChange);
         };
-    }, []);
-
-    const fetchUserProfile = async (session: Session) => {
-        try {
-            console.log('👤 Auth: Fetching profile for', session.user.email);
-
-            // TIMEOUT: Don't wait more than 4 seconds for the profile
-            const fetchPromise = supabase
-                .from('profiles')
-                .select('*')
-                .eq('id', session.user.id)
-                .single();
-
-            const timeoutPromise = new Promise((_, reject) =>
-                setTimeout(() => reject(new Error('Profile fetch timed out')), 4000)
-            );
-
-            const { data, error } = await Promise.race([fetchPromise, timeoutPromise]) as any;
-
-            if (data) {
-                setUser({
-                    id: data.id,
-                    name: data.full_name || 'Admin User',
-                    email: data.email,
-                    role: (data.role as UserRole) || UserRole.REGULAR,
-                    assignedProjectIds: []
-                });
-                console.log('✅ Auth: Profile loaded');
-            } else {
-                console.warn('⚠️ Auth: Profile not found. This user might not be in allowed_users.');
-                setUser(null);
-            }
-        } catch (error) {
-            console.error('❌ Auth: Profile fetch failed:', error);
-            // On error, we keep user as null so the UI can show a Retry or Change Account button
-        } finally {
-            setLoading(false);
-        }
-    };
+    }, [fetchUserProfile]);
 
     const loginWithGoogle = async () => {
         const { error } = await supabase.auth.signInWithOAuth({
